@@ -1,0 +1,80 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>WebRTC Peer Client — Manual Test Harness</title>
+</head>
+<body>
+<p><em>Temporary dev harness for Phase 3 (WebRTC Peer Connection Layer). Not the real UI — that's Phase 4.</em></p>
+<h3>Room: <span id="room"></span></h3>
+<p>Status: <span id="status">idle</span></p>
+<input type="file" id="fileInput" />
+<button id="sendBtn" disabled>Send File</button>
+<p>Progress: <span id="progress">0%</span></p>
+<div id="result"></div>
+
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script type="module">
+  import { connect } from "./src/webrtc/peerClient.js";
+
+  const params = new URLSearchParams(location.search);
+  const roomId = params.get("room") || "default-room";
+  document.getElementById("room").textContent = roomId;
+
+  const statusEl = document.getElementById("status");
+  const progressEl = document.getElementById("progress");
+  const resultEl = document.getElementById("result");
+  const sendBtn = document.getElementById("sendBtn");
+  const fileInput = document.getElementById("fileInput");
+
+  function toHex(buf) {
+    return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  function randomBytes(size) {
+    const bytes = new Uint8Array(size);
+    const maxChunk = 65536;
+    for (let i = 0; i < size; i += maxChunk) {
+      crypto.getRandomValues(bytes.subarray(i, Math.min(i + maxChunk, size)));
+    }
+    return bytes;
+  }
+
+  const client = connect({
+    serverUrl: "http://localhost:4000",
+    roomId,
+    onStatus: (s) => {
+      statusEl.textContent = s;
+      window.__status = s;
+      if (s === "connected") sendBtn.disabled = false;
+    },
+    onProgress: (p) => {
+      progressEl.textContent = Math.round(p * 100) + "%";
+    },
+    onFileReceived: async (blob, meta) => {
+      window.__lastReceivedBlob = blob;
+      window.__lastReceivedMeta = meta;
+      const buf = await blob.arrayBuffer();
+      window.__receivedHash = toHex(await crypto.subtle.digest("SHA-256", buf));
+      resultEl.textContent = `Received: ${meta.name} (${meta.size} bytes) sha256=${window.__receivedHash}`;
+    },
+  });
+
+  sendBtn.onclick = () => {
+    const file = fileInput.files[0];
+    if (file) client.sendFile(file);
+  };
+
+  // Debug helper for automated verification: generates a random in-memory file,
+  // hashes it before sending, and sends it over the data channel.
+  window.__sendRandomTestFile = async (sizeBytes) => {
+    const bytes = randomBytes(sizeBytes);
+    const file = new File([bytes], "random-test.bin", { type: "application/octet-stream" });
+    window.__sentHash = toHex(await crypto.subtle.digest("SHA-256", bytes));
+    window.__sentSize = sizeBytes;
+    await client.sendFile(file);
+    return window.__sentHash;
+  };
+</script>
+</body>
+</html>
