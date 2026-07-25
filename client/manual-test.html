@@ -83,10 +83,6 @@
       window.__integrityOk = meta.integrityOk;
       resultEl.textContent =
         `Received: ${meta.name} (${meta.size} bytes) sha256=${meta.actualHash} integrityOk=${meta.integrityOk}`;
-
-      if (meta.integrityOk && meta.mimeType === "application/pdf") {
-        client.sendText("pdf file is received correctly");
-      }
     },
     onText: (text) => {
       window.__lastReceivedText = text;
@@ -119,6 +115,20 @@
     window.__sentHash = await client.sendFile(file);
     return window.__sentHash;
   };
+
+  // Fetches a real local file from the static server's /test-files/ route (no OS file
+  // picker available for automated testing) and sends it as-is over the data channel.
+  window.__sendLocalFile = async (url, filename, mimeType) => {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error("Fetch failed: " + resp.status);
+    const blob = await resp.blob();
+    const file = new File([blob], filename, { type: mimeType || blob.type || "application/octet-stream" });
+    window.__sentSize = file.size;
+    window.__sentHash = await client.sendFile(file);
+    return { hash: window.__sentHash, size: file.size };
+  };
+
+  window.__sendText = (text) => client.sendText(text);
 </script>
 </body>
 </html>

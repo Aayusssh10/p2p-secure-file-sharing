@@ -78,3 +78,11 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
     auto-sent "pdf file is received correctly" back over the data channel — received by
     A. Repeated B→A with the same result. Both directions: correct transfer verified
     end-to-end, receiver-side integrity check plus confirmation message.
+  - **Tested with real user-supplied PDFs (not synthetic) and a custom two-way ack
+    exchange.** A→B: `200mb.pdf` (209,880,487 bytes, 2050 pages) in ~29s, SHA-256
+    matched, `integrityOk: true`; B replied "Nice Work A" over the data channel,
+    received by A. B→A: `100mb.pdf` (104,970,204 bytes, 1026 pages) in ~16s, SHA-256
+    matched, `integrityOk: true`; A replied "File received from A", received by B.
+    Real local files were served to the browser via a `/test-files/` route on the dev
+    static server (no OS file-picker automation available) — the files themselves still
+    moved peer-to-peer over the data channel exactly like any other transfer.
