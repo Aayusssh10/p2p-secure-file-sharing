@@ -24,6 +24,19 @@ function statusInfo(status) {
   return STATUS_INFO[status] || { text: status || "Connecting…", tone: "neutral" };
 }
 
+// Statuses meaning the data channel is no longer usable — any transfer in
+// flight has been abandoned and its progress UI must not stay stuck showing
+// stale percentages forever.
+const TERMINAL_STATUSES = new Set([
+  "disconnected",
+  "failed",
+  "closed",
+  "channel-closed",
+  "channel-error",
+  "peer-left",
+  "room-full",
+]);
+
 function formatBytes(bytes) {
   if (!bytes) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
@@ -50,7 +63,14 @@ export default function Room({ roomId, onLeave }) {
     const client = connect({
       serverUrl: SERVER_URL,
       roomId,
-      onStatus: setStatus,
+      onStatus: (s) => {
+        setStatus(s);
+        if (TERMINAL_STATUSES.has(s)) {
+          setReceiveProgress(null);
+          setReceiveMeta(null);
+          setSendProgress(null);
+        }
+      },
       onProgress: (p) => setReceiveProgress(p),
       onFileReceived: (blob, meta) => {
         setReceiveProgress(null);

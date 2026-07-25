@@ -141,3 +141,34 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
     `runtimeExecutable` directly at `C:\Program Files\nodejs\node.exe` for both the
     server and the client (`node_modules/vite/bin/vite.js`) instead of relying on
     `npm`/`npm.cmd`, which fails with `'node' is not recognized`.
+- **Phase 4 hardening pass.** Ran four adversarial tests against the real signaling +
+  Vite dev servers before allowing a push:
+  1. **Large file + back-to-back transfers through the UI.** Drag-dropped a 110MB
+     random file (well past the 100MB bar) between two tabs — sent and received in
+     under 10s, sha256 matched, UI reset cleanly. Immediately followed with 3 more
+     files (15MB, 20MB, 10MB) sent back-to-back with no pause — all 4 transfers landed
+     correctly in order on the receiver's history list, sender's dropzone/progress UI
+     reset after each one, no memory/state freeze, zero console errors either side.
+  2. **3rd peer room-full rejection.** With 2 peers already connected, opened a 3rd tab
+     on the same room code. Server correctly rejected it (room cap enforced in
+     `roomManager.js` from Phase 2); the 3rd tab's status pill showed "Room is full
+     (max 2 peers)" with no crash, and the two existing peers stayed connected and
+     unaffected.
+  3. **Mid-transfer disconnect.** Started a 200MB send, then abruptly killed the
+     sender's tab (not a graceful "Leave" click) while the receiver was mid-stream at
+     1-9% received. **Found and fixed a real bug:** the receiver's "Receiving…" progress
+     card had no listener on connection-terminal states, so it froze at its last
+     percentage forever instead of clearing — misleadingly implying a transfer was
+     still in progress. Fixed in `Room.jsx` by adding a `TERMINAL_STATUSES` set
+     (`disconnected`, `failed`, `closed`, `channel-closed`, `channel-error`,
+     `peer-left`, `room-full`) that clears `receiveProgress`/`receiveMeta`/`sendProgress`
+     whenever `onStatus` reports one. Re-tested after the fix with a fresh 200MB
+     mid-stream kill: status correctly flipped to "Data channel closed" and the
+     progress card cleared immediately, no unhandled exceptions in the console either
+     time (before or after the fix — the crash risk was a stuck UI, not a JS throw).
+  4. **Production build.** `npm run build` (via `vite build`, run directly since `npm`
+     has the same `node`-not-on-`PATH` issue noted above) completed cleanly in ~1s:
+     65 modules transformed, `dist/index.html` + hashed CSS/JS assets emitted, no
+     JSX/bundling errors. No Tailwind in this project, so nothing to check there.
+  All four checks pass. `client/dist/` stays gitignored as before; the only source
+  change from this pass is the `Room.jsx` terminal-status fix above.
