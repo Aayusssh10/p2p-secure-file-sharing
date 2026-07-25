@@ -65,3 +65,16 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
     (~3,200 chunks each way): A→B in ~2.6s, B→A in ~4.3s, SHA-256 hashes matched exactly
     both times with the exact byte count (52,428,800 bytes) preserved. Backpressure
     handling held up under the larger volume with no drops or corruption.
+  - **Added self-verifying integrity + text messaging.** `fileTransfer.js` now has the
+    sender read the whole file into memory, hash it (SHA-256), and embed the hash in
+    `file-meta`; the receiver re-hashes the reassembled `Blob` and sets `integrityOk`
+    itself — no external comparison needed. Also added `sendText()` / `onText` for
+    plain chat-style messages over the same data channel.
+  - **Tested at 80MB with a real PDF-format file and a two-way integrity ack.**
+    `manual-test.html` now builds an actual syntactically-valid PDF (`%PDF-1.4` header,
+    catalog/pages/page objects, a content stream filled with random bytes, trailer/EOF)
+    rather than raw random bytes. Sent an 80MB PDF (83,886,080 bytes) A→B: hash matched,
+    `integrityOk: true`, `%PDF-1.4` header verified intact on the received blob, and B
+    auto-sent "pdf file is received correctly" back over the data channel — received by
+    A. Repeated B→A with the same result. Both directions: correct transfer verified
+    end-to-end, receiver-side integrity check plus confirmation message.

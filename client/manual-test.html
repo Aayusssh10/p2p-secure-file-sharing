@@ -12,6 +12,7 @@
 <button id="sendBtn" disabled>Send File</button>
 <p>Progress: <span id="progress">0%</span></p>
 <div id="result"></div>
+<div id="chatLog"></div>
 
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <script type="module">
@@ -24,12 +25,9 @@
   const statusEl = document.getElementById("status");
   const progressEl = document.getElementById("progress");
   const resultEl = document.getElementById("result");
+  const chatLogEl = document.getElementById("chatLog");
   const sendBtn = document.getElementById("sendBtn");
   const fileInput = document.getElementById("fileInput");
-
-  function toHex(buf) {
-    return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
-  }
 
   function randomBytes(size) {
     const bytes = new Uint8Array(size);
@@ -38,6 +36,33 @@
       crypto.getRandomValues(bytes.subarray(i, Math.min(i + maxChunk, size)));
     }
     return bytes;
+  }
+
+  // Builds a syntactically real PDF (valid %PDF header, catalog/pages/page objects,
+  // a content stream filled with random bytes, trailer/EOF) at roughly the requested size.
+  function buildRandomPdf(totalSize) {
+    const footer = "\nendstream\nendobj\ntrailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF";
+    const footerBytes = new TextEncoder().encode(footer);
+    const headerPrefix =
+      "%PDF-1.4\n" +
+      "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n" +
+      "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n" +
+      "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> /Contents 4 0 R >>\nendobj\n" +
+      "4 0 obj\n<< /Length ";
+    const headerSuffix = " >>\nstream\n";
+
+    const overheadEstimate = new TextEncoder().encode(headerPrefix + "00000000" + headerSuffix).length + footerBytes.length;
+    const payloadSize = Math.max(0, totalSize - overheadEstimate);
+    const header = headerPrefix + payloadSize + headerSuffix;
+    const headerBytes = new TextEncoder().encode(header);
+    const payload = randomBytes(payloadSize);
+
+    const out = new Uint8Array(headerBytes.length + payload.length + footerBytes.length);
+    out.set(headerBytes, 0);
+    out.set(payload, headerBytes.length);
+    out.set(footerBytes, headerBytes.length + payload.length);
+
+    return new File([out], "random-test.pdf", { type: "application/pdf" });
   }
 
   const client = connect({
@@ -51,12 +76,23 @@
     onProgress: (p) => {
       progressEl.textContent = Math.round(p * 100) + "%";
     },
-    onFileReceived: async (blob, meta) => {
+    onFileReceived: (blob, meta) => {
       window.__lastReceivedBlob = blob;
       window.__lastReceivedMeta = meta;
-      const buf = await blob.arrayBuffer();
-      window.__receivedHash = toHex(await crypto.subtle.digest("SHA-256", buf));
-      resultEl.textContent = `Received: ${meta.name} (${meta.size} bytes) sha256=${window.__receivedHash}`;
+      window.__receivedHash = meta.actualHash;
+      window.__integrityOk = meta.integrityOk;
+      resultEl.textContent =
+        `Received: ${meta.name} (${meta.size} bytes) sha256=${meta.actualHash} integrityOk=${meta.integrityOk}`;
+
+      if (meta.integrityOk && meta.mimeType === "application/pdf") {
+        client.sendText("pdf file is received correctly");
+      }
+    },
+    onText: (text) => {
+      window.__lastReceivedText = text;
+      const line = document.createElement("div");
+      line.textContent = "peer says: " + text;
+      chatLogEl.appendChild(line);
     },
   });
 
@@ -65,14 +101,22 @@
     if (file) client.sendFile(file);
   };
 
-  // Debug helper for automated verification: generates a random in-memory file,
-  // hashes it before sending, and sends it over the data channel.
+  // Debug helper: generates a random in-memory PDF-format file and sends it.
+  // sendFile() itself computes and embeds the sha256 (see fileTransfer.js), which
+  // is what the receiver uses to self-verify integrity before replying.
+  window.__sendRandomPdf = async (sizeBytes) => {
+    const file = buildRandomPdf(sizeBytes);
+    window.__sentSize = file.size;
+    window.__sentHash = await client.sendFile(file);
+    return window.__sentHash;
+  };
+
+  // Kept for earlier raw-binary tests.
   window.__sendRandomTestFile = async (sizeBytes) => {
     const bytes = randomBytes(sizeBytes);
     const file = new File([bytes], "random-test.bin", { type: "application/octet-stream" });
-    window.__sentHash = toHex(await crypto.subtle.digest("SHA-256", bytes));
     window.__sentSize = sizeBytes;
-    await client.sendFile(file);
+    window.__sentHash = await client.sendFile(file);
     return window.__sentHash;
   };
 </script>

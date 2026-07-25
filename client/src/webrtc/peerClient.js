@@ -5,11 +5,11 @@ import {
   acceptAnswer,
   addIceCandidate,
 } from "./peerConnection.js";
-import { sendFile, createFileReceiver } from "./fileTransfer.js";
+import { sendFile, sendText, createFileReceiver } from "./fileTransfer.js";
 
 // Orchestrates signaling (Phase 2 server) + RTCPeerConnection (Phase 3) into one
 // connect(...) call that resolves a working data channel between two peers in a room.
-export function connect({ serverUrl, roomId, onStatus, onFileReceived, onProgress }) {
+export function connect({ serverUrl, roomId, onStatus, onFileReceived, onProgress, onText }) {
   const socket = window.io(serverUrl);
   let pc = null;
   let dataChannel = null;
@@ -21,6 +21,7 @@ export function connect({ serverUrl, roomId, onStatus, onFileReceived, onProgres
   const handleReceiverMessage = createFileReceiver({
     onProgress,
     onComplete: (blob, meta) => onFileReceived && onFileReceived(blob, meta),
+    onText,
   });
 
   function setupDataChannel(channel) {
@@ -82,6 +83,7 @@ export function connect({ serverUrl, roomId, onStatus, onFileReceived, onProgres
 
   return {
     sendFile: (file, opts) => sendFile(dataChannel, file, opts),
+    sendText: (text) => sendText(dataChannel, text),
     disconnect: () => {
       if (dataChannel) dataChannel.close();
       if (pc) pc.close();
