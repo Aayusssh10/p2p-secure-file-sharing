@@ -61,3 +61,7 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
     connections from any other origin. Not a code change (env-config only) — worth knowing
     that `CLIENT_URL` must match wherever the frontend actually runs (Phase 4 will pin this
     down once the React dev server's port is chosen).
+  - **Stress-tested at 50MB.** Sent a 50MB in-memory random file in both directions
+    (~3,200 chunks each way): A→B in ~2.6s, B→A in ~4.3s, SHA-256 hashes matched exactly
+    both times with the exact byte count (52,428,800 bytes) preserved. Backpressure
+    handling held up under the larger volume with no drops or corruption.
