@@ -8,7 +8,7 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
 - **Phase 0: Synopsis** — DONE
 - **Phase 1: Create GitHub repo + push full documentation** (README, PROGRESS.md,
   ARCHITECTURE.md, .gitignore, folder skeleton) — DONE
-- **Phase 2: Signaling Server** (Node.js, Express, Socket.io) — IN PROGRESS (code written, untested — Node.js not yet installed on dev machine)
+- **Phase 2: Signaling Server** (Node.js, Express, Socket.io) — DONE
 - **Phase 3: WebRTC Peer Connection Layer** — PENDING
 - **Phase 4: React Frontend** (rooms, file picker, progress UI) — PENDING
 - **Phase 5: MongoDB Integration** — PENDING
@@ -31,6 +31,8 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
     payloads untouched between the two peers in a room), `leave-room`, `disconnect` cleanup.
   - `package.json` (express, socket.io, cors, dotenv, nodemon) and `.env.example`
     (`PORT`, `CLIENT_URL`).
-  - **Not yet run or tested** — Node.js/npm are not installed on the dev machine used for
-    this session. Install Node, run `npm install` then `npm run dev` in `/server` to verify
-    before considering Phase 2 complete.
+  - **Verified working.** Node.js LTS (v24.18.0) installed via winget. `npm install`
+    succeeded (0 vulnerabilities). Ran the server locally and drove it with a two-client
+    Socket.io test script: join-room, peer-joined notification, signal relay (SDP offer
+    payload delivered untouched to the other peer), and peer-left on disconnect all passed
+    (5/5 checks).
