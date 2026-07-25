@@ -7,6 +7,14 @@ function registerSignalingHandlers(socket) {
       return;
     }
 
+    // A socket that's already in a different room (e.g. a misbehaving client
+    // firing join-room twice without leaving) must not keep a ghost
+    // membership behind in the old room once it eventually disconnects.
+    const existingRoom = findRoomBySocket(socket.id);
+    if (existingRoom && existingRoom !== roomId) {
+      handleLeave(socket, existingRoom);
+    }
+
     const result = joinRoom(roomId, socket.id);
     if (!result.ok) {
       socket.emit("room-full", roomId);
@@ -20,8 +28,12 @@ function registerSignalingHandlers(socket) {
     socket.to(roomId).emit("peer-joined", { peerId: socket.id });
   });
 
-  // data carries the SDP offer/answer or ICE candidate — server relays it untouched
-  socket.on("signal", ({ roomId, data } = {}) => {
+  // data carries the SDP offer/answer or ICE candidate — server relays it untouched.
+  // payload may be null/a primitive/anything from a misbehaving client, so guard
+  // the destructure instead of trusting it's an object (a bare `= {}` default only
+  // covers `undefined`, not `null` or other non-object values).
+  socket.on("signal", (payload) => {
+    const { roomId, data } = payload && typeof payload === "object" ? payload : {};
     if (!roomId || !data) return;
     socket.to(roomId).emit("signal", { peerId: socket.id, data });
   });

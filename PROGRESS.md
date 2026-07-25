@@ -36,6 +36,23 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
     Socket.io test script: join-room, peer-joined notification, signal relay (SDP offer
     payload delivered untouched to the other peer), and peer-left on disconnect all passed
     (5/5 checks).
+  - **Resilience-tested with `test-stress.js`** (spawns the server as a real child
+    process so a crash is observable, runs 4 adversarial scenarios concurrently: sudden
+    disconnect mid-handshake, malformed/duplicate signal packets, room-cap enforcement
+    under 5 simultaneous joiners, graceful leave with signaling in flight). First run
+    against the original code **crashed the entire server process** — any client
+    emitting `signal` with a `null` payload threw an uncaught `TypeError` from
+    destructuring `null` in `signaling.js`, taking down every other concurrent
+    connection with it. Also found that a client calling `join-room` twice with two
+    different room IDs (without ever leaving the first) left a permanent ghost
+    occupant in the original room, since `disconnect` cleanup only ever found and
+    cleaned the first room a socket was tracked in.
+    **Fixed both** in `signaling.js`: the `signal` handler now guards the destructure
+    against non-object payloads instead of trusting a bare `= {}` default (which only
+    covers `undefined`, not `null`); `join-room` now leaves any existing room first
+    before joining a new one. Re-ran `test-stress.js` twice after the fix — 9/9 checks
+    passed both times, server stayed alive and responsive throughout. Re-ran the
+    original Phase 2 test scripts too — no regressions (5/5 and 4/4 still passing).
 - **Phase 3:** WebRTC peer connection layer scaffolded in `/client/src/webrtc`:
   - `peerConnection.js` — `RTCPeerConnection` setup (STUN: Google public; TURN slot left
     for the pending provider decision), offer/answer/ICE-candidate helpers.
