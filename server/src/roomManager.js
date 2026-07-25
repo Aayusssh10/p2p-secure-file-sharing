@@ -33,4 +33,10 @@ function findRoomBySocket(socketId) {
   return null;
 }
 
-module.exports = { joinRoom, leaveRoom, findRoomBySocket, MAX_PEERS_PER_ROOM };
+function getStats() {
+  let socketCount = 0;
+  for (const peers of rooms.values()) socketCount += peers.size;
+  return { roomCount: rooms.size, socketCount };
+}
+
+module.exports = { joinRoom, leaveRoom, findRoomBySocket, MAX_PEERS_PER_ROOM, getStats };

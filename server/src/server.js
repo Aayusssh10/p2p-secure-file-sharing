@@ -4,6 +4,7 @@ const http = require("http");
 const cors = require("cors");
 const { Server } = require("socket.io");
 const { registerSignalingHandlers } = require("./signaling");
+const { getStats } = require("./roomManager");
 
 const PORT = process.env.PORT || 4000;
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:3000";
@@ -22,6 +23,17 @@ const io = new Server(server, {
 
 io.on("connection", (socket) => {
   registerSignalingHandlers(socket);
+});
+
+// Debug/metrics endpoint — never exposes room IDs or signaling payloads, just
+// counts and process memory, for load-testing and ops visibility.
+app.get("/debug/stats", (req, res) => {
+  res.json({
+    ...getStats(),
+    connectedSockets: io.engine.clientsCount,
+    memoryUsage: process.memoryUsage(),
+    uptime: process.uptime(),
+  });
 });
 
 server.listen(PORT, () => {

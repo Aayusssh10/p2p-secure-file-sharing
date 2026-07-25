@@ -172,3 +172,24 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
      JSX/bundling errors. No Tailwind in this project, so nothing to check there.
   All four checks pass. `client/dist/` stays gitignored as before; the only source
   change from this pass is the `Room.jsx` terminal-status fix above.
+- **Phase 4 → Phase 2 follow-up: signaling server load test.** Pushed the Phase 4 work
+  to `origin/main`, then added `server/test-load.js` to check the signaling server
+  under concurrent load rather than just the adversarial edge cases `test-stress.js`
+  already covers:
+  - Added a small `GET /debug/stats` endpoint to `server.js` (backed by a new
+    `roomManager.getStats()`) returning `{ roomCount, socketCount, connectedSockets,
+    memoryUsage, uptime }` — counts and process memory only, never room IDs or
+    signaling payloads — so an external test script can verify no leaks without
+    reaching into the spawned child process.
+  - `test-load.js` spawns the real server as a child process, then runs 3 back-to-back
+    rounds of: 50 concurrent socket connections joining 25 different rooms (2 peers
+    each, filling every room) all at the same time, a mock offer/answer/ICE-candidate
+    signaling exchange per room (symmetric on both peers so it works regardless of
+    which one the server happens to admit first under concurrency), a 5-second hold,
+    then all 50 disconnecting together.
+  - **All 10 checks passed.** 150 total connections across 75 room-instances over the
+    3 rounds; `roomCount` and `connectedSockets` returned to exactly 0 after every
+    round's cleanup (no leaked rooms, no leaked sockets); RSS after round 1 (67.68MB)
+    vs. after round 3 (63.84MB) was a **-5.7%** change — i.e. memory did not grow
+    across repeated load, well inside the 20% flatness threshold; the server process
+    stayed alive and `/health`-responsive throughout.
