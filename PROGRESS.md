@@ -10,7 +10,7 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
   ARCHITECTURE.md, .gitignore, folder skeleton) — DONE
 - **Phase 2: Signaling Server** (Node.js, Express, Socket.io) — DONE
 - **Phase 3: WebRTC Peer Connection Layer** — DONE
-- **Phase 4: React Frontend** (rooms, file picker, progress UI) — PENDING
+- **Phase 4: React Frontend** (rooms, file picker, progress UI) — DONE
 - **Phase 5: MongoDB Integration** — PENDING
 - **Phase 6: Gemini API Auxiliary Module** — PENDING
 - **Phase 7: Testing, Polish, Deployment** — PENDING
@@ -103,3 +103,41 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
     Real local files were served to the browser via a `/test-files/` route on the dev
     static server (no OS file-picker automation available) — the files themselves still
     moved peer-to-peer over the data channel exactly like any other transfer.
+- **Phase 4:** React frontend scaffolded in `/client` with Vite (React 18):
+  - `src/pages/Home.jsx` — landing page: "Create Room" (generates a random 6-char code)
+    and "Join Room" (code input), both drive the room ID into the URL (`?room=CODE`) so
+    invite links are shareable.
+  - `src/pages/Room.jsx` — the transfer UI: room code header with copy-invite-link and
+    leave buttons, a live status pill (waiting-for-peer / connected / peer-left / etc.,
+    driven directly off `peerClient.js`'s `onStatus`), a drag-and-drop + click-to-browse
+    file picker, a send-progress bar, a unified sent/received transfer history list
+    (with sha256 prefix and an integrity ✓/✗ badge sourced from `fileTransfer.js`'s
+    self-verification, plus a download link for received files via `URL.createObjectURL`),
+    and a text chat panel wired to `sendText`/`onText`.
+  - `src/App.jsx` — all the routing this needs: reads/writes the `?room=` query param
+    with `history.pushState`, no router library.
+  - `src/main.jsx` — imports `socket.io-client` and assigns it to `window.io` so the
+    existing `peerClient.js` (which calls `window.io(serverUrl)`) works unmodified for
+    both the bundled React app and the standalone `manual-test.html` (which loads
+    socket.io from a CDN script tag instead) — avoided touching any Phase 3 WebRTC code.
+  - Vite dev server pinned to port 3000 (`vite.config.js`) to match the signaling
+    server's default `CLIENT_URL` for CORS out of the box.
+  - **Verified working in real browser tabs**, driving the actual signaling server
+    (port 4000) and Vite dev server (port 3000) together, not just component-level
+    checks: created a room in tab A, joined the same room code in tab B, both reached
+    "Connected — ready to transfer files" automatically. Drag-dropped a 2MB random file
+    in tab A (via a synthetic `DataTransfer`/`drop` event, since headless browser
+    automation has no OS file-picker) and sent it — tab B's transfer list showed it
+    received with a matching sha256 prefix and "✓ verified". Sent a chat message from
+    tab A — appeared in tab B as "Peer: ...". Clicked "Leave" in tab B — tab A's status
+    correctly flipped to "Peer has left the room" while its transfer history stayed
+    intact. Checked both dev server logs: no errors in either. Confirmed via the
+    network log that only small Socket.io long-polling frames hit port 4000 during the
+    whole test — consistent with the core privacy rule, since the file itself moves
+    over the WebRTC data channel, not through any HTTP request the browser network
+    panel would show.
+  - One environment note (not a code bug): this machine's Node.js install isn't on the
+    default `PATH` for spawned dev-server processes, so `.claude/launch.json` points
+    `runtimeExecutable` directly at `C:\Program Files\nodejs\node.exe` for both the
+    server and the client (`node_modules/vite/bin/vite.js`) instead of relying on
+    `npm`/`npm.cmd`, which fails with `'node' is not recognized`.
