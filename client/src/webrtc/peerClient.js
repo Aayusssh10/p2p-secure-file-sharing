@@ -6,11 +6,24 @@ import {
   addIceCandidate,
 } from "./peerConnection.js";
 import { sendFile, sendText, createFileReceiver } from "./fileTransfer.js";
+import { sanitizeDisplayName } from "../utils/displayName.js";
 
 // Orchestrates signaling (Phase 2 server) + RTCPeerConnection (Phase 3) into one
 // connect(...) call that resolves a working data channel between two peers in a room.
-export function connect({ serverUrl, roomId, onStatus, onFileReceived, onProgress, onText }) {
+export function connect({
+  serverUrl,
+  roomId,
+  displayName,
+  onStatus,
+  onFileReceived,
+  onProgress,
+  onText,
+  onPeerJoined,
+  onPeerLeft,
+  onPeerName,
+}) {
   const socket = window.io(serverUrl);
+  const myName = sanitizeDisplayName(displayName);
   let pc = null;
   let dataChannel = null;
 
@@ -21,7 +34,7 @@ export function connect({ serverUrl, roomId, onStatus, onFileReceived, onProgres
   const handleReceiverMessage = createFileReceiver({
     onProgress,
     onComplete: (blob, meta) => onFileReceived && onFileReceived(blob, meta),
-    onText,
+    onText: (text, name) => onText && onText(text, name),
   });
 
   function setupDataChannel(channel) {
@@ -43,9 +56,16 @@ export function connect({ serverUrl, roomId, onStatus, onFileReceived, onProgres
     });
   }
 
-  socket.on("joined-room", async ({ peers }) => {
+  socket.on("joined-room", async ({ peers, peerNames }) => {
     setupPeerConnection();
     const isInitiator = peers.length > 0;
+
+    // Learn the already-present peer's name quietly (no "joined" chat line —
+    // they didn't just join, we did) so the joiner's UI isn't left blank
+    // about who they're connecting to.
+    if (onPeerName && peerNames && peerNames.length > 0) {
+      onPeerName(peerNames[0].displayName);
+    }
 
     if (isInitiator) {
       const channel = pc.createDataChannel("file-transfer");
@@ -57,7 +77,10 @@ export function connect({ serverUrl, roomId, onStatus, onFileReceived, onProgres
     emitStatus("waiting-for-peer");
   });
 
-  socket.on("peer-joined", () => emitStatus("peer-joined"));
+  socket.on("peer-joined", (payload) => {
+    emitStatus("peer-joined");
+    if (onPeerJoined) onPeerJoined(payload && payload.displayName);
+  });
 
   socket.on("signal", async ({ data }) => {
     if (data.type === "offer") {
@@ -70,8 +93,9 @@ export function connect({ serverUrl, roomId, onStatus, onFileReceived, onProgres
     }
   });
 
-  socket.on("peer-left", () => {
+  socket.on("peer-left", (payload) => {
     emitStatus("peer-left");
+    if (onPeerLeft) onPeerLeft(payload && payload.displayName);
     if (dataChannel) dataChannel.close();
     if (pc) pc.close();
   });
@@ -79,11 +103,11 @@ export function connect({ serverUrl, roomId, onStatus, onFileReceived, onProgres
   socket.on("room-full", () => emitStatus("room-full"));
   socket.on("error-message", (msg) => emitStatus("error: " + msg));
 
-  socket.emit("join-room", roomId);
+  socket.emit("join-room", { roomId, displayName: myName });
 
   return {
     sendFile: (file, opts) => sendFile(dataChannel, file, opts),
-    sendText: (text) => sendText(dataChannel, text),
+    sendText: (text) => sendText(dataChannel, text, myName),
     disconnect: () => {
       if (dataChannel) dataChannel.close();
       if (pc) pc.close();

@@ -1,27 +1,39 @@
 import { useEffect, useRef, useState } from "react";
 import { connect } from "../webrtc/peerClient.js";
+import { sanitizeDisplayName } from "../utils/displayName.js";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:4000";
 
 const STATUS_INFO = {
   idle: { text: "Connecting to signaling server…", tone: "neutral" },
   "waiting-for-peer": { text: "Waiting for a peer to join…", tone: "neutral" },
-  "peer-joined": { text: "Peer joined — negotiating connection…", tone: "neutral" },
   new: { text: "Establishing peer-to-peer connection…", tone: "neutral" },
   connecting: { text: "Establishing peer-to-peer connection…", tone: "neutral" },
-  connected: { text: "Connected — ready to transfer files", tone: "good" },
   disconnected: { text: "Connection lost", tone: "bad" },
   failed: { text: "Connection failed", tone: "bad" },
   closed: { text: "Connection closed", tone: "bad" },
   "channel-closed": { text: "Data channel closed", tone: "bad" },
   "channel-error": { text: "Data channel error", tone: "bad" },
-  "peer-left": { text: "Peer has left the room", tone: "warn" },
   "room-full": { text: "Room is full (max 2 peers)", tone: "bad" },
 };
 
-function statusInfo(status) {
+// peer-joined / connected / peer-left get the peer's display name mixed in,
+// so they can't live in the static lookup above.
+function statusInfo(status, peerName) {
   if (status && status.startsWith("error:")) return { text: status, tone: "bad" };
-  return STATUS_INFO[status] || { text: status || "Connecting…", tone: "neutral" };
+  switch (status) {
+    case "peer-joined":
+      return { text: `${peerName || "Peer"} joined — negotiating connection…`, tone: "neutral" };
+    case "connected":
+      return {
+        text: peerName ? `Connected with ${peerName} — ready to transfer files` : "Connected — ready to transfer files",
+        tone: "good",
+      };
+    case "peer-left":
+      return { text: `${peerName || "Your peer"} has left the room`, tone: "warn" };
+    default:
+      return STATUS_INFO[status] || { text: status || "Connecting…", tone: "neutral" };
+  }
 }
 
 // Statuses meaning the data channel is no longer usable — any transfer in
@@ -44,8 +56,11 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
-export default function Room({ roomId, onLeave }) {
+export default function Room({ roomId, displayName, onLeave }) {
+  const myName = sanitizeDisplayName(displayName);
+
   const [status, setStatus] = useState("idle");
+  const [peerName, setPeerName] = useState(null);
   const [selectedFile, setSelectedFile] = useState(null);
   const [sendProgress, setSendProgress] = useState(null);
   const [receiveMeta, setReceiveMeta] = useState(null);
@@ -63,6 +78,7 @@ export default function Room({ roomId, onLeave }) {
     const client = connect({
       serverUrl: SERVER_URL,
       roomId,
+      displayName: myName,
       onStatus: (s) => {
         setStatus(s);
         if (TERMINAL_STATUSES.has(s)) {
@@ -70,6 +86,16 @@ export default function Room({ roomId, onLeave }) {
           setReceiveMeta(null);
           setSendProgress(null);
         }
+      },
+      onPeerName: (name) => setPeerName(name || "Peer"),
+      onPeerJoined: (name) => {
+        const joinedName = name || "Peer";
+        setPeerName(joinedName);
+        setMessages((prev) => [...prev, { from: "system", text: `${joinedName} joined the room`, time: Date.now() }]);
+      },
+      onPeerLeft: (name) => {
+        const leftName = name || peerName || "Your peer";
+        setMessages((prev) => [...prev, { from: "system", text: `${leftName} left the room`, time: Date.now() }]);
       },
       onProgress: (p) => setReceiveProgress(p),
       onFileReceived: (blob, meta) => {
@@ -88,8 +114,8 @@ export default function Room({ roomId, onLeave }) {
           ...prev,
         ]);
       },
-      onText: (text) => {
-        setMessages((prev) => [...prev, { from: "peer", text, time: Date.now() }]);
+      onText: (text, name) => {
+        setMessages((prev) => [...prev, { from: "peer", name: name || "Anonymous Peer", text, time: Date.now() }]);
       },
     });
     clientRef.current = client;
@@ -98,6 +124,7 @@ export default function Room({ roomId, onLeave }) {
       client.disconnect();
       clientRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId]);
 
   // Track "receiving a file" separately from raw byte progress so the UI can
@@ -110,7 +137,7 @@ export default function Room({ roomId, onLeave }) {
   }, [receiveProgress, receiveMeta]);
 
   const shareUrl = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
-  const info = statusInfo(status);
+  const info = statusInfo(status, peerName);
   const connected = status === "connected";
 
   const handleFiles = (files) => {
@@ -153,7 +180,7 @@ export default function Room({ roomId, onLeave }) {
     if (!text || !clientRef.current) return;
     try {
       clientRef.current.sendText(text);
-      setMessages((prev) => [...prev, { from: "me", text, time: Date.now() }]);
+      setMessages((prev) => [...prev, { from: "me", name: myName, text, time: Date.now() }]);
       setChatInput("");
     } catch (err) {
       setError(err.message || "Failed to send message");
@@ -303,11 +330,18 @@ export default function Room({ roomId, onLeave }) {
         <h2>Chat</h2>
         <div className="chat-log">
           {messages.length === 0 && <p className="muted">No messages yet.</p>}
-          {messages.map((m, i) => (
-            <div key={i} className={`chat-msg chat-${m.from}`}>
-              <span className="chat-from">{m.from === "me" ? "You" : "Peer"}:</span> {m.text}
-            </div>
-          ))}
+          {messages.map((m, i) =>
+            m.from === "system" ? (
+              <div key={i} className="chat-system">{m.text}</div>
+            ) : (
+              <div key={i} className={`chat-msg chat-${m.from}`}>
+                <span className="chat-from" title={m.from === "me" ? `${m.name} (You)` : m.name}>
+                  {m.from === "me" ? `${m.name} (You)` : m.name}:
+                </span>{" "}
+                {m.text}
+              </div>
+            )
+          )}
         </div>
         <form className="join-form" onSubmit={handleSendText}>
           <input

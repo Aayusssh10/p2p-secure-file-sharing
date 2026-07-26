@@ -322,6 +322,19 @@ body {
 }
 
 .chat-from {
+  display: inline-block;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
   color: #9aa5b8;
   font-size: 0.8rem;
+}
+
+.chat-system {
+  align-self: center;
+  font-size: 0.8rem;
+  font-style: italic;
+  color: #9aa5b8;
 }

@@ -193,3 +193,33 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
     vs. after round 3 (63.84MB) was a **-5.7%** change — i.e. memory did not grow
     across repeated load, well inside the 20% flatness threshold; the server process
     stayed alive and `/health`-responsive throughout.
+- **Phase 4 polish: display names.** Added a "Your Name" field so peers aren't just
+  anonymous "Peer"s to each other:
+  - `Home.jsx` — a name input (used for both Create and Join). Invite links (`?room=`)
+    now land on Home with the code pre-filled instead of skipping straight into the
+    room, so a link-joiner still gets asked for their name — fixed after first testing
+    showed direct invite links bypassed name entry entirely.
+  - Signaling protocol: `join-room` now carries `{ roomId, displayName }` (still
+    tolerates a bare roomId string, so `test-stress.js`/`test-load.js` needed no
+    changes); `peer-joined`/`peer-left` broadcast the name; `joined-room` now also
+    returns the *already-present* peer's name to a new joiner (`peerNames`) — without
+    this, the second peer into a room never learned the first peer's name, since
+    `peer-joined` only fires for sockets already in the room.
+  - Status pill and chat now use real names ("Connected with Aayush…", "Aayush joined
+    the room", "Aayush: hello") instead of generic "Peer" text, symmetric on both
+    sides. Blank name defaults to "Anonymous Peer" at every layer (Home, Room.jsx,
+    peerClient.js, and the server) as a defense-in-depth default, not just one point.
+  - **Hardening pass after manual edge-case testing** (client `utils/displayName.js` +
+    mirrored server-side in `signaling.js`, since the server is the authoritative
+    enforcement point — a malicious/modified client could bypass the browser UI
+    entirely): trims and strips `<`/`>` from names (React already escapes text nodes,
+    so no live XSS existed, but explicit stripping added anyway), a small basic
+    profanity blocklist that falls back to "Anonymous Peer" on a match, length capped
+    at 20 chars (down from an initial 40) with CSS `text-overflow: ellipsis`
+    truncation on the chat name label, and a "(You)" suffix on the local user's own
+    chat messages so two peers with the same name can still tell messages apart.
+    Verified in-browser: a `<script>BadName1234567890</script>` name arrived on the
+    peer's side as the correctly stripped-and-truncated `scriptBadName1234567`, and a
+    profane name arrived as `Anonymous Peer`, both with no console errors. Re-ran
+    `test-stress.js` (9/9) and `test-load.js` (10/10) after the signaling protocol
+    change — no regressions — and `vite build` stayed clean.

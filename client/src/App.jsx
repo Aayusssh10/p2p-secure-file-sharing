@@ -7,12 +7,18 @@ function roomIdFromUrl() {
 }
 
 export default function App() {
-  const [roomId, setRoomId] = useState(roomIdFromUrl);
+  // A room code in the URL (e.g. from a shared invite link) only prefills the
+  // Join Room field on Home — it must not skip straight into the room, since
+  // the joiner still needs to be asked for their display name.
+  const [initialCode] = useState(roomIdFromUrl);
+  const [roomId, setRoomId] = useState(null);
+  const [displayName, setDisplayName] = useState("");
 
-  const enterRoom = useCallback((id) => {
+  const enterRoom = useCallback((id, name) => {
     const url = new URL(window.location.href);
     url.searchParams.set("room", id);
     window.history.pushState({}, "", url);
+    setDisplayName(name || "");
     setRoomId(id);
   }, []);
 
@@ -24,8 +30,8 @@ export default function App() {
   }, []);
 
   return roomId ? (
-    <Room roomId={roomId} onLeave={leaveRoom} />
+    <Room roomId={roomId} displayName={displayName} onLeave={leaveRoom} />
   ) : (
-    <Home onEnterRoom={enterRoom} />
+    <Home onEnterRoom={enterRoom} initialCode={initialCode} />
   );
 }

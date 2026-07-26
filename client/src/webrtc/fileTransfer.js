@@ -61,11 +61,11 @@ export async function sendFile(channel, file, { onProgress } = {}) {
   });
 }
 
-export function sendText(channel, text) {
+export function sendText(channel, text, name) {
   if (!channel || channel.readyState !== "open") {
     throw new Error("Data channel is not open");
   }
-  channel.send(JSON.stringify({ type: "chat", text }));
+  channel.send(JSON.stringify({ type: "chat", text, name }));
 }
 
 export function createFileReceiver({ onProgress, onComplete, onText }) {
@@ -87,7 +87,7 @@ export function createFileReceiver({ onProgress, onComplete, onText }) {
         meta = null;
         chunks = [];
       } else if (msg.type === "chat") {
-        if (onText) onText(msg.text);
+        if (onText) onText(msg.text, msg.name);
       }
       return;
     }
