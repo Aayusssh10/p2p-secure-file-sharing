@@ -5,9 +5,15 @@ const cors = require("cors");
 const { Server } = require("socket.io");
 const { registerSignalingHandlers } = require("./signaling");
 const { getStats } = require("./roomManager");
+const { connectToDatabase } = require("./db");
 
 const PORT = process.env.PORT || 4000;
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:3000";
+
+// Not awaited: the signaling server must start and accept connections
+// immediately regardless of whether MongoDB is configured, reachable, or
+// slow to respond — metrics persistence is a strictly additive feature.
+connectToDatabase();
 
 const app = express();
 app.use(cors({ origin: CLIENT_URL }));

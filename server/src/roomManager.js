@@ -18,12 +18,14 @@ function joinRoom(roomId, socketId) {
 
 function leaveRoom(roomId, socketId) {
   const peers = rooms.get(roomId);
-  if (!peers) return;
+  if (!peers) return { closed: false };
 
   peers.delete(socketId);
   if (peers.size === 0) {
     rooms.delete(roomId);
+    return { closed: true };
   }
+  return { closed: false };
 }
 
 function findRoomBySocket(socketId) {

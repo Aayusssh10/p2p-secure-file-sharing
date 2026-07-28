@@ -176,7 +176,14 @@ async function sendFileToChannel(ch, buffer, metaJson, fileId, onChannelProgress
     // nothing left to notify and the channel's own close event on the
     // receiver's side (see peerClient.js) handles that case instead.
     try {
-      if (ch.readyState === "open") ch.send(JSON.stringify({ type: "file-abort", fileId }));
+      if (ch.readyState === "open") {
+        // Distinguishes "gave up because the peer couldn't drain fast
+        // enough" (stalled) from every other failure mode (aborted) — see
+        // BACKPRESSURE_STALL_MS above — purely for the receiver's telemetry
+        // report; the receiver-side cleanup itself doesn't care which.
+        const reason = err instanceof Error && err.message === "backpressure-stall-timeout" ? "stalled" : "aborted";
+        ch.send(JSON.stringify({ type: "file-abort", fileId, reason }));
+      }
     } catch {
       // channel is gone; nothing to notify
     }
@@ -268,10 +275,28 @@ export function sendText(channels, text, name) {
 // way it's correct to drop whatever was buffered and start fresh, which
 // also bounds memory to at most one partially-received file's worth of
 // chunks per channel at any moment.
-export function createFileReceiver({ onProgress, onComplete, onText, onAbort }) {
-  let current = null; // { meta, chunks, receivedBytes } | null
+//
+// onTelemetry fires once per terminal outcome (completed/aborted/stalled)
+// with { status, fileSizeBytes, durationMs, sha256Match, fileId } — the
+// receiver reports, not the sender, since only the receiver actually knows
+// whether the hash matched or the transfer was ever interrupted. This is
+// Phase 5 (MongoDB) plumbing; peerClient.js is what actually emits it to
+// the signaling server.
+export function createFileReceiver({ onProgress, onComplete, onText, onAbort, onTelemetry }) {
+  let current = null; // { meta, chunks, receivedBytes, startedAt } | null
 
-  return function handleMessage(event) {
+  function reportTelemetry(status, sha256Match) {
+    if (!onTelemetry || !current) return;
+    onTelemetry({
+      status,
+      fileSizeBytes: current.meta.size,
+      durationMs: Date.now() - current.startedAt,
+      sha256Match,
+      fileId: current.meta.fileId,
+    });
+  }
+
+  function handleMessage(event) {
     const { data } = event;
 
     if (typeof data === "string") {
@@ -284,10 +309,10 @@ export function createFileReceiver({ onProgress, onComplete, onText, onAbort }) 
 
       if (msg.type === "file-meta") {
         if (!msg.fileId) return; // no id to safely track this file by — drop it rather than guess
-        current = { meta: msg, chunks: [], receivedBytes: 0 };
+        current = { meta: msg, chunks: [], receivedBytes: 0, startedAt: Date.now() };
       } else if (msg.type === "file-end") {
         if (!current || current.meta.fileId !== msg.fileId) return; // stray/duplicate/mismatched end
-        finalizeFile(current.meta, current.chunks, onComplete);
+        finalizeFile(current.meta, current.chunks, Date.now() - current.startedAt, onComplete, onTelemetry);
         current = null;
       } else if (msg.type === "file-abort") {
         // The sender gave up on this specific transfer (backpressure-stall
@@ -296,6 +321,7 @@ export function createFileReceiver({ onProgress, onComplete, onText, onAbort }) 
         // vanished mid-file would sit at some stale percentage forever with
         // no signal that nothing more is ever coming.
         if (!current || current.meta.fileId !== msg.fileId) return;
+        reportTelemetry(msg.reason === "stalled" ? "stalled" : "aborted", false);
         current = null;
         if (onAbort) onAbort(msg.fileId);
       } else if (msg.type === "chat") {
@@ -308,13 +334,30 @@ export function createFileReceiver({ onProgress, onComplete, onText, onAbort }) 
     current.chunks.push(data);
     current.receivedBytes += data.byteLength;
     if (onProgress) onProgress(Math.min(current.receivedBytes / current.meta.size, 1), current.meta.fileId);
-  };
+  }
+
+  // The sender's channel can vanish without ever sending file-abort (a hard
+  // disconnect — tab close, network death — never gets the chance). Called
+  // by peerClient.js whenever this channel is being torn down; a no-op if
+  // there's no transfer in flight, and safe to call more than once (e.g.
+  // both the channel's own close event and an explicit peer-left cleanup
+  // racing each other) since the second call finds `current` already null.
+  function notifyChannelClosed() {
+    if (!current) return;
+    reportTelemetry("aborted", false);
+    current = null;
+  }
+
+  return { handleMessage, notifyChannelClosed };
 }
 
-async function finalizeFile(meta, chunks, onComplete) {
+async function finalizeFile(meta, chunks, durationMs, onComplete, onTelemetry) {
   const blob = new Blob(chunks, { type: meta.mimeType || "application/octet-stream" });
   const buffer = await blob.arrayBuffer();
   const actualHash = await sha256Hex(buffer);
   const integrityOk = !meta.sha256 || actualHash === meta.sha256;
   if (onComplete) onComplete(blob, { ...meta, actualHash, integrityOk });
+  if (onTelemetry) {
+    onTelemetry({ status: "completed", fileSizeBytes: meta.size, durationMs, sha256Match: integrityOk, fileId: meta.fileId });
+  }
 }

@@ -1,4 +1,7 @@
 const { joinRoom, leaveRoom, findRoomBySocket } = require("./roomManager");
+const metricsTracker = require("./metricsTracker");
+const { persistRoomSession, persistTransferMetric } = require("./metricsPersistence");
+const { TRANSFER_STATUSES } = require("./models/transferStatuses");
 
 const DEFAULT_DISPLAY_NAME = "Anonymous Peer";
 const MAX_NAME_LENGTH = 20;
@@ -65,6 +68,11 @@ function registerSignalingHandlers(socket) {
     });
     socket.emit("joined-room", { roomId, peers: otherPeers, peerNames: otherPeerNames });
     socket.to(roomId).emit("peer-joined", { peerId: socket.id, displayName });
+
+    // result.peers already includes this joiner (see roomManager.joinRoom),
+    // so its length is the room's current size — enough to track the peak
+    // without a separate peer-added/peer-removed event pair.
+    metricsTracker.recordJoin(roomId, result.peers.length);
   });
 
   // data carries the SDP offer/answer or ICE candidate — server relays it untouched.
@@ -86,6 +94,34 @@ function registerSignalingHandlers(socket) {
     socket.to(destination).emit("signal", { peerId: socket.id, data });
   });
 
+  // Reported by the receiving peer once a transfer's outcome is known (see
+  // fileTransfer.js/peerClient.js on the client) — this is client telemetry,
+  // not server-verified fact: the server never sees the file, so it can't
+  // independently confirm fileSizeBytes/durationMs/sha256Match itself. Only
+  // receiverId is trusted as authoritative here (it's this socket); everything
+  // else is validated for shape/type and otherwise taken at face value.
+  socket.on("telemetry:transfer_result", (payload) => {
+    if (!payload || typeof payload !== "object") return;
+    const { roomId, senderId, fileSizeBytes, durationMs, status, sha256Match } = payload;
+
+    if (typeof roomId !== "string" || !roomId) return;
+    if (typeof senderId !== "string" || !senderId) return;
+    if (typeof fileSizeBytes !== "number" || !Number.isFinite(fileSizeBytes) || fileSizeBytes < 0) return;
+    if (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0) return;
+    if (!TRANSFER_STATUSES.includes(status)) return;
+
+    metricsTracker.recordTransferOutcome(roomId, status);
+    persistTransferMetric({
+      roomId,
+      senderId,
+      receiverId: socket.id,
+      fileSizeBytes,
+      durationMs,
+      status,
+      sha256Match: !!sha256Match,
+    });
+  });
+
   socket.on("leave-room", (roomId) => {
     handleLeave(socket, roomId);
   });
@@ -97,12 +133,26 @@ function registerSignalingHandlers(socket) {
 }
 
 function handleLeave(socket, roomId) {
-  leaveRoom(roomId, socket.id);
+  const { closed } = leaveRoom(roomId, socket.id);
   socket.leave(roomId);
   socket.to(roomId).emit("peer-left", {
     peerId: socket.id,
     displayName: socket.data.displayName || DEFAULT_DISPLAY_NAME,
   });
+
+  if (closed) {
+    const snapshot = metricsTracker.closeRoom(roomId);
+    if (snapshot) {
+      persistRoomSession({
+        roomId,
+        createdAt: snapshot.createdAt,
+        closedAt: new Date(),
+        peakPeersCount: snapshot.peakPeersCount,
+        transfersCompleted: snapshot.transfersCompleted,
+        transfersFailed: snapshot.transfersFailed,
+      });
+    }
+  }
 }
 
 module.exports = { registerSignalingHandlers };

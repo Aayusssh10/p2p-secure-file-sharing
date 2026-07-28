@@ -54,7 +54,7 @@ export function connect({
     if (!entry) return;
     entry.dataChannel = channel;
 
-    const handleReceiverMessage = createFileReceiver({
+    const receiver = createFileReceiver({
       onProgress: (p, fileId) => onProgress && onProgress(p, peerId, fileId),
       onComplete: (blob, meta) => onFileReceived && onFileReceived(blob, meta, peerId),
       onAbort: (fileId) => {
@@ -62,12 +62,25 @@ export function connect({
         if (onFileAborted) onFileAborted(peerId, fileId, currentName);
       },
       onText: (text, name) => onText && onText(text, name, peerId),
+      // Phase 5: best-effort report to the signaling server for MongoDB
+      // metrics. Fire-and-forget and purely additive — never allowed to
+      // affect the live transfer/UI path, so a disconnected signaling
+      // socket at report time just means this one report is dropped.
+      onTelemetry: (report) => {
+        if (socket.connected) {
+          socket.emit("telemetry:transfer_result", { roomId, senderId: peerId, ...report });
+        }
+      },
     });
+    entry.receiver = receiver;
 
     channel.onopen = updateConnectedStatus;
-    channel.onclose = updateConnectedStatus;
+    channel.onclose = () => {
+      receiver.notifyChannelClosed();
+      updateConnectedStatus();
+    };
     channel.onerror = () => emitStatus("channel-error");
-    channel.onmessage = handleReceiverMessage;
+    channel.onmessage = receiver.handleMessage;
   }
 
   // Creates (or returns, if one already exists) the RTCPeerConnection for a
@@ -154,6 +167,13 @@ export function connect({
     const entry = peers.get(peerId);
     if (!entry) return;
     if (entry.dataChannel) {
+      // onclose is nulled below before close() runs (avoids a stale
+      // updateConnectedStatus call after peers.delete has already happened),
+      // so notifyChannelClosed has to be called explicitly here instead of
+      // relying on the channel's own close event — it's idempotent/no-op if
+      // there's no transfer in flight, or if the channel's close event beat
+      // this to it (see fileTransfer.js).
+      if (entry.receiver) entry.receiver.notifyChannelClosed();
       entry.dataChannel.onopen = null;
       entry.dataChannel.onclose = null;
       entry.dataChannel.onerror = null;
