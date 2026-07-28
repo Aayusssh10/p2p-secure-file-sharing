@@ -14,6 +14,9 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
 - **Phase 5: MongoDB Integration** — PENDING
 - **Phase 6: Gemini API Auxiliary Module** — PENDING
 - **Phase 7: Testing, Polish, Deployment** — PENDING
+- **Multi-Peer Mesh Support** (3-4 peers per room) — DONE, on the `multi-peer` branch
+  (not yet merged to `main`). Originally scoped to Future Scope only; reversed after
+  discussion with the guide, who approved building it now.
 
 ## Progress Log
 
@@ -223,3 +226,61 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
     profane name arrived as `Anonymous Peer`, both with no console errors. Re-ran
     `test-stress.js` (9/9) and `test-load.js` (10/10) after the signaling protocol
     change — no regressions — and `vite build` stayed clean.
+- **Multi-peer mesh support (branch: `multi-peer`).** Extended rooms from a fixed
+  2-peer cap to up to 4 peers, using a full mesh topology (every peer holds an
+  independent `RTCPeerConnection`/`RTCDataChannel` to every other peer) — chosen over
+  an SFU specifically because an SFU would mean a server actively relaying/decrypting
+  data, breaking the project's core "no file content ever touches the server"
+  guarantee; mesh keeps that guarantee structurally intact at the cost of not scaling
+  past a handful of peers (the sender's upload bandwidth multiplies by N-1).
+  - `roomManager.js`: `MAX_PEERS_PER_ROOM` raised from 2 to 4 — the join/leave logic
+    was already peer-count-agnostic (`Set` + size check), no other change needed.
+  - `signaling.js`: the `signal` relay was the one real correctness bug for mesh — it
+    broadcast to the whole room, which is equivalent to "the other peer" at 2 peers
+    but would corrupt every other pairwise SDP negotiation at 3+. Now takes a
+    `targetPeerId` and relays point-to-point via `socket.to(targetPeerId)` (Socket.io
+    auto-joins every socket to a room named after its own id), falling back to the old
+    room-wide broadcast if `targetPeerId` is absent — keeps `test-stress.js`/
+    `test-load.js` passing unmodified.
+  - `peerClient.js` rewritten around a `Map<peerId, {pc, dataChannel, displayName}>`
+    instead of one global connection — initiator role is assigned deterministically
+    (whoever joins later offers to every existing peer; existing peers just wait), so
+    there's no offer/answer glare even when multiple people join at once.
+  - `fileTransfer.js`'s `sendFile`/`sendText` now take an array of channels: the file
+    is read and hashed **once** regardless of peer count, then each chunk is broadcast
+    to every open channel (backpressure gated on the slowest one); a channel that dies
+    mid-broadcast is dropped from the set rather than aborting the transfer for
+    everyone else, and if *all* channels die mid-send the promise now rejects instead
+    of silently "succeeding" with nobody having received anything.
+  - `Room.jsx`: single `peerName` state replaced with a `peers` object keyed by
+    peerId; status pill lists everyone connected ("Connected with Bob, Carol, Dave");
+    received-file entries tagged with the sender's name.
+  - **Found and fixed a real bug during manual testing**, a new variant of the
+    stuck-progress-bar issue from the 2-peer hardening pass: if the peer currently
+    *sending* a file disconnects mid-transfer, the overall status correctly stays
+    "connected" (the other peers are still mesh-connected to each other), so the old
+    terminal-status-based clearing never fired, leaving "Receiving… 22%" stuck forever
+    on every other peer's screen. Fixed with a `receivingFromRef` in `Room.jsx` that
+    tracks which peer the current in-flight receive is from, so `onPeerLeft` only
+    clears the progress bar when the peer who left is the one who was actually
+    sending it — an unrelated transfer from a still-connected peer is left alone.
+  - **New test:** `server/test-multipeer-signaling.js` (17 checks, all passing) —
+    4 peers joining with correct peer/name fan-out to each joiner, a 5th peer
+    correctly rejected with `room-full`, the targeted-signal fix verified directly
+    (a signal aimed at one peer does not reach two bystanders in the same room), and
+    peer-left fan-out to the remaining 3 plus a stray post-departure signal handled
+    as a no-op rather than a crash.
+  - **Manual 4-tab browser verification:** all 4 tabs (Alice/Bob/Carol/Dave) reached
+    full mesh, status pill correctly listed the other 3 names on every tab; an 8MB
+    file sent by Alice was received and sha256-verified by all 3 others, each tagged
+    "from Alice"; a chat message broadcast the same way with the correct sender name;
+    a 5th tab attempting to join saw "Room is full (max 4 peers)"; killing one peer's
+    tab mid-transfer (150MB) correctly notified the remaining 3, who stayed mesh-
+    connected to each other with zero console errors, and (after the fix above) no
+    stuck progress bar.
+  - Regression-tested `test-stress.js` (9/9 — one scenario's expected numbers updated
+    from "2 of 5 admitted" to "4 of 7 admitted" to match the new cap, not a behavior
+    change) and `test-load.js` (10/10, unmodified) — both still pass. `vite build`
+    stays clean.
+  - Working on the `multi-peer` git branch, not `main` — the already-tested 2-peer
+    version stays safe and gradable until this is deliberately merged.

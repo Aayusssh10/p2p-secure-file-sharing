@@ -8,8 +8,14 @@ import {
 import { sendFile, sendText, createFileReceiver } from "./fileTransfer.js";
 import { sanitizeDisplayName } from "../utils/displayName.js";
 
-// Orchestrates signaling (Phase 2 server) + RTCPeerConnection (Phase 3) into one
-// connect(...) call that resolves a working data channel between two peers in a room.
+// Orchestrates signaling (Phase 2 server) + WebRTC into one connect(...) call
+// that resolves a mesh of peer connections between everyone in a room: each
+// pairwise link (this browser <-> one other peer) is an independent
+// RTCPeerConnection/RTCDataChannel, tracked in a Map keyed by the remote
+// peer's socket id. Initiator role is assigned deterministically — whoever
+// joins later offers to everyone already in the room; existing peers just
+// wait for that offer — so there's no glare even when multiple people join
+// at nearly the same time.
 export function connect({
   serverUrl,
   roomId,
@@ -24,68 +30,97 @@ export function connect({
 }) {
   const socket = window.io(serverUrl);
   const myName = sanitizeDisplayName(displayName);
-  let pc = null;
-  let dataChannel = null;
+  const peers = new Map(); // peerId -> { pc, dataChannel, displayName }
 
   const emitStatus = (status) => {
     if (onStatus) onStatus(status);
   };
 
-  const handleReceiverMessage = createFileReceiver({
-    onProgress,
-    onComplete: (blob, meta) => onFileReceived && onFileReceived(blob, meta),
-    onText: (text, name) => onText && onText(text, name),
-  });
+  // Overall status is a simple "is at least one peer connected" signal — the
+  // per-peer join/leave/name callbacks below carry the granular detail the
+  // UI needs to tell peers apart.
+  const updateConnectedStatus = () => {
+    const anyOpen = [...peers.values()].some((p) => p.dataChannel && p.dataChannel.readyState === "open");
+    emitStatus(anyOpen ? "connected" : "waiting-for-peer");
+  };
 
-  function setupDataChannel(channel) {
+  function setupDataChannel(peerId, channel) {
     channel.binaryType = "arraybuffer";
-    dataChannel = channel;
-    channel.onopen = () => emitStatus("connected");
-    channel.onclose = () => emitStatus("channel-closed");
+    const entry = peers.get(peerId);
+    if (!entry) return;
+    entry.dataChannel = channel;
+
+    const handleReceiverMessage = createFileReceiver({
+      onProgress: (p) => onProgress && onProgress(p, peerId),
+      onComplete: (blob, meta) => onFileReceived && onFileReceived(blob, meta, peerId),
+      onText: (text, name) => onText && onText(text, name, peerId),
+    });
+
+    channel.onopen = updateConnectedStatus;
+    channel.onclose = updateConnectedStatus;
     channel.onerror = () => emitStatus("channel-error");
     channel.onmessage = handleReceiverMessage;
   }
 
-  function setupPeerConnection() {
-    pc = createPeerConnection({
+  // Creates (or returns, if one already exists) the RTCPeerConnection for a
+  // given remote peer. Every pairwise link gets its own ICE/SDP negotiation,
+  // completely independent of every other peer in the room.
+  function getOrCreateConnection(peerId, peerDisplayName) {
+    const existing = peers.get(peerId);
+    if (existing) return existing.pc;
+
+    const pc = createPeerConnection({
       onIceCandidate: (candidate) => {
-        socket.emit("signal", { roomId, data: { type: "ice-candidate", candidate } });
+        socket.emit("signal", { roomId, targetPeerId: peerId, data: { type: "ice-candidate", candidate } });
       },
-      onDataChannel: (channel) => setupDataChannel(channel),
-      onConnectionStateChange: (state) => emitStatus(state),
+      onDataChannel: (channel) => setupDataChannel(peerId, channel),
+      onConnectionStateChange: (state) => {
+        if (state === "failed" || state === "closed") updateConnectedStatus();
+      },
     });
+    peers.set(peerId, { pc, dataChannel: null, displayName: peerDisplayName || "Peer" });
+    return pc;
   }
 
-  socket.on("joined-room", async ({ peers, peerNames }) => {
-    setupPeerConnection();
-    const isInitiator = peers.length > 0;
+  function closeConnection(peerId) {
+    const entry = peers.get(peerId);
+    if (!entry) return;
+    if (entry.dataChannel) entry.dataChannel.close();
+    if (entry.pc) entry.pc.close();
+    peers.delete(peerId);
+  }
 
-    // Learn the already-present peer's name quietly (no "joined" chat line —
-    // they didn't just join, we did) so the joiner's UI isn't left blank
-    // about who they're connecting to.
-    if (onPeerName && peerNames && peerNames.length > 0) {
-      onPeerName(peerNames[0].displayName);
-    }
+  socket.on("joined-room", async ({ peers: existingPeerIds, peerNames }) => {
+    for (const peerId of existingPeerIds) {
+      const nameEntry = (peerNames || []).find((p) => p.peerId === peerId);
+      const peerDisplayName = nameEntry ? nameEntry.displayName : "Peer";
+      if (onPeerName) onPeerName(peerDisplayName, peerId);
 
-    if (isInitiator) {
+      const pc = getOrCreateConnection(peerId, peerDisplayName);
       const channel = pc.createDataChannel("file-transfer");
-      setupDataChannel(channel);
+      setupDataChannel(peerId, channel);
       const offer = await createOffer(pc);
-      socket.emit("signal", { roomId, data: { type: "offer", sdp: offer } });
+      socket.emit("signal", { roomId, targetPeerId: peerId, data: { type: "offer", sdp: offer } });
     }
 
-    emitStatus("waiting-for-peer");
+    emitStatus(existingPeerIds.length > 0 ? "connecting" : "waiting-for-peer");
   });
 
-  socket.on("peer-joined", (payload) => {
+  socket.on("peer-joined", ({ peerId, displayName: peerDisplayName }) => {
+    // Just wait here — the newcomer is the one who initiates (see
+    // joined-room above), so this side only needs a connection to receive
+    // their offer into once it arrives via "signal".
+    getOrCreateConnection(peerId, peerDisplayName);
     emitStatus("peer-joined");
-    if (onPeerJoined) onPeerJoined(payload && payload.displayName);
+    if (onPeerJoined) onPeerJoined(peerDisplayName, peerId);
   });
 
-  socket.on("signal", async ({ data }) => {
+  socket.on("signal", async ({ peerId, data }) => {
+    const pc = getOrCreateConnection(peerId);
+
     if (data.type === "offer") {
       const answer = await createAnswer(pc, data.sdp);
-      socket.emit("signal", { roomId, data: { type: "answer", sdp: answer } });
+      socket.emit("signal", { roomId, targetPeerId: peerId, data: { type: "answer", sdp: answer } });
     } else if (data.type === "answer") {
       await acceptAnswer(pc, data.sdp);
     } else if (data.type === "ice-candidate") {
@@ -93,11 +128,10 @@ export function connect({
     }
   });
 
-  socket.on("peer-left", (payload) => {
-    emitStatus("peer-left");
-    if (onPeerLeft) onPeerLeft(payload && payload.displayName);
-    if (dataChannel) dataChannel.close();
-    if (pc) pc.close();
+  socket.on("peer-left", ({ peerId, displayName: peerDisplayName }) => {
+    closeConnection(peerId);
+    updateConnectedStatus();
+    if (onPeerLeft) onPeerLeft(peerDisplayName, peerId);
   });
 
   socket.on("room-full", () => emitStatus("room-full"));
@@ -105,12 +139,14 @@ export function connect({
 
   socket.emit("join-room", { roomId, displayName: myName });
 
+  const openChannels = () =>
+    [...peers.values()].map((p) => p.dataChannel).filter((ch) => ch && ch.readyState === "open");
+
   return {
-    sendFile: (file, opts) => sendFile(dataChannel, file, opts),
-    sendText: (text) => sendText(dataChannel, text, myName),
+    sendFile: (file, opts) => sendFile(openChannels(), file, opts),
+    sendText: (text) => sendText(openChannels(), text, myName),
     disconnect: () => {
-      if (dataChannel) dataChannel.close();
-      if (pc) pc.close();
+      [...peers.keys()].forEach(closeConnection);
       socket.disconnect();
     },
   };

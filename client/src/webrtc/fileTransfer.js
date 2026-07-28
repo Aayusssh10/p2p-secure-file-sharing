@@ -12,48 +12,67 @@ async function sha256Hex(buffer) {
   return toHex(await crypto.subtle.digest("SHA-256", buffer));
 }
 
-// Reads the whole file into memory, hashes it, then streams it out in chunks.
-// The hash travels in file-meta so the receiver can self-verify integrity
-// without any out-of-band comparison.
-export async function sendFile(channel, file, { onProgress } = {}) {
-  if (!channel || channel.readyState !== "open") {
-    throw new Error("Data channel is not open");
+// Reads the whole file into memory, hashes it once, then broadcasts it in
+// chunks to every open channel passed in. One file read/hash regardless of
+// peer count — sending the same already-computed chunk to N channels is much
+// cheaper than re-reading/re-hashing per recipient. A channel that closes or
+// errors mid-broadcast is simply dropped from the active set rather than
+// aborting the whole transfer for everyone else.
+export async function sendFile(channels, file, { onProgress } = {}) {
+  let openChannels = (channels || []).filter((ch) => ch && ch.readyState === "open");
+  if (openChannels.length === 0) {
+    throw new Error("No open data channels");
   }
 
   const buffer = await file.arrayBuffer();
   const sha256 = await sha256Hex(buffer);
 
-  channel.bufferedAmountLowThreshold = BUFFERED_AMOUNT_LOW_THRESHOLD;
-  channel.send(
-    JSON.stringify({ type: "file-meta", name: file.name, size: file.size, mimeType: file.type, sha256 })
-  );
+  const meta = JSON.stringify({ type: "file-meta", name: file.name, size: file.size, mimeType: file.type, sha256 });
+  openChannels.forEach((ch) => {
+    ch.bufferedAmountLowThreshold = BUFFERED_AMOUNT_LOW_THRESHOLD;
+    ch.send(meta);
+  });
 
   return new Promise((resolve, reject) => {
     let offset = 0;
 
     function sendNextChunk() {
       while (offset < buffer.byteLength) {
-        const chunk = buffer.slice(offset, offset + CHUNK_SIZE);
-        try {
-          channel.send(chunk);
-        } catch (err) {
-          reject(err);
+        openChannels = openChannels.filter((ch) => ch.readyState === "open");
+        if (openChannels.length === 0) {
+          reject(new Error("All peers disconnected during transfer"));
           return;
         }
+
+        const chunk = buffer.slice(offset, offset + CHUNK_SIZE);
+        openChannels.forEach((ch) => {
+          try {
+            ch.send(chunk);
+          } catch {
+            // dropped below on the next readyState filter pass
+          }
+        });
 
         offset += chunk.byteLength;
         if (onProgress) onProgress(Math.min(offset / buffer.byteLength, 1));
 
-        if (channel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
-          channel.onbufferedamountlow = () => {
-            channel.onbufferedamountlow = null;
-            sendNextChunk();
-          };
-          return; // pause here; resumes from onbufferedamountlow
+        const overloaded = openChannels.filter((ch) => ch.bufferedAmount > MAX_BUFFERED_AMOUNT);
+        if (overloaded.length > 0) {
+          let remaining = overloaded.length;
+          overloaded.forEach((ch) => {
+            ch.onbufferedamountlow = () => {
+              ch.onbufferedamountlow = null;
+              remaining -= 1;
+              if (remaining === 0) sendNextChunk();
+            };
+          });
+          return; // pause here; resumes once every over-threshold channel drains
         }
       }
 
-      channel.send(JSON.stringify({ type: "file-end" }));
+      openChannels.forEach((ch) => {
+        if (ch.readyState === "open") ch.send(JSON.stringify({ type: "file-end" }));
+      });
       resolve(sha256);
     }
 
@@ -61,11 +80,11 @@ export async function sendFile(channel, file, { onProgress } = {}) {
   });
 }
 
-export function sendText(channel, text, name) {
-  if (!channel || channel.readyState !== "open") {
-    throw new Error("Data channel is not open");
-  }
-  channel.send(JSON.stringify({ type: "chat", text, name }));
+export function sendText(channels, text, name) {
+  const payload = JSON.stringify({ type: "chat", text, name });
+  (channels || []).forEach((ch) => {
+    if (ch && ch.readyState === "open") ch.send(payload);
+  });
 }
 
 export function createFileReceiver({ onProgress, onComplete, onText }) {

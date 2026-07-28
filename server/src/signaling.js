@@ -71,10 +71,19 @@ function registerSignalingHandlers(socket) {
   // payload may be null/a primitive/anything from a misbehaving client, so guard
   // the destructure instead of trusting it's an object (a bare `= {}` default only
   // covers `undefined`, not `null` or other non-object values).
+  //
+  // targetPeerId routes the message to exactly one socket. With only 2 peers
+  // in a room, "broadcast to everyone else" and "send to the one other peer"
+  // are the same thing, but with 3+ peers a room-wide broadcast would corrupt
+  // every other pairwise negotiation. Socket.io auto-joins every socket to a
+  // room named after its own id, so `.to(targetPeerId)` is a plain point-to-
+  // point send. Falls back to the old room-wide broadcast if targetPeerId is
+  // missing (older/test clients), which is still correct for a 2-peer room.
   socket.on("signal", (payload) => {
-    const { roomId, data } = payload && typeof payload === "object" ? payload : {};
+    const { roomId, targetPeerId, data } = payload && typeof payload === "object" ? payload : {};
     if (!roomId || !data) return;
-    socket.to(roomId).emit("signal", { peerId: socket.id, data });
+    const destination = targetPeerId || roomId;
+    socket.to(destination).emit("signal", { peerId: socket.id, data });
   });
 
   socket.on("leave-room", (roomId) => {

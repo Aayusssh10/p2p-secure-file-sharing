@@ -187,10 +187,13 @@ async function scenarioMalformedPackets() {
   );
 }
 
-// ---------- Scenario 3: room cap enforcement under 5 simultaneous joiners ----------
+// ---------- Scenario 3: room cap enforcement under 7 simultaneous joiners ----------
+// Room cap is 4 (multi-peer mesh, bumped up from the original 2-peer cap) —
+// 7 simultaneous joiners keeps the same "+3 over capacity" margin the
+// original 5-joiners-against-a-cap-of-2 test used.
 async function scenarioRoomCapEnforcement() {
   const room = uniqueRoom("cap");
-  const clients = Array.from({ length: 5 }, () => newClient());
+  const clients = Array.from({ length: 7 }, () => newClient());
 
   const outcomes = await Promise.all(
     clients.map(
@@ -210,8 +213,8 @@ async function scenarioRoomCapEnforcement() {
   const fullCount = outcomes.filter((o) => o === "room-full").length;
 
   check(
-    "Scenario 3: exactly 2 of 5 simultaneous joiners admitted, remaining 3 rejected with room-full",
-    joinedCount === 2 && fullCount === 3,
+    "Scenario 3: exactly 4 of 7 simultaneous joiners admitted, remaining 3 rejected with room-full",
+    joinedCount === 4 && fullCount === 3,
     `outcomes=${JSON.stringify(outcomes)}`
   );
 }

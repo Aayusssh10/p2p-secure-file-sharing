@@ -14,38 +14,43 @@ const STATUS_INFO = {
   closed: { text: "Connection closed", tone: "bad" },
   "channel-closed": { text: "Data channel closed", tone: "bad" },
   "channel-error": { text: "Data channel error", tone: "bad" },
-  "room-full": { text: "Room is full (max 2 peers)", tone: "bad" },
+  "room-full": { text: "Room is full (max 4 peers)", tone: "bad" },
 };
 
-// peer-joined / connected / peer-left get the peer's display name mixed in,
-// so they can't live in the static lookup above.
-function statusInfo(status, peerName) {
+function namesList(peers) {
+  return Object.values(peers).join(", ");
+}
+
+// "peer-joined" / "connected" get the room's peer names mixed in (there can
+// be more than one now), so they can't live in the static lookup above.
+function statusInfo(status, peers) {
   if (status && status.startsWith("error:")) return { text: status, tone: "bad" };
+  const names = namesList(peers);
   switch (status) {
     case "peer-joined":
-      return { text: `${peerName || "Peer"} joined — negotiating connection…`, tone: "neutral" };
+      return { text: `${names || "A peer"} joined — negotiating connection…`, tone: "neutral" };
     case "connected":
       return {
-        text: peerName ? `Connected with ${peerName} — ready to transfer files` : "Connected — ready to transfer files",
+        text: names ? `Connected with ${names} — ready to transfer files` : "Connected — ready to transfer files",
         tone: "good",
       };
-    case "peer-left":
-      return { text: `${peerName || "Your peer"} has left the room`, tone: "warn" };
     default:
       return STATUS_INFO[status] || { text: status || "Connecting…", tone: "neutral" };
   }
 }
 
-// Statuses meaning the data channel is no longer usable — any transfer in
+// Statuses meaning no data channel is usable at all — any transfer in
 // flight has been abandoned and its progress UI must not stay stuck showing
-// stale percentages forever.
+// stale percentages forever. One peer leaving a multi-peer room is *not*
+// terminal on its own (others may still be connected) — peerClient.js
+// already re-derives "connected" vs "waiting-for-peer" after any single
+// peer-left, so that's handled via onStatus, not this set.
 const TERMINAL_STATUSES = new Set([
   "disconnected",
   "failed",
   "closed",
   "channel-closed",
   "channel-error",
-  "peer-left",
   "room-full",
 ]);
 
@@ -60,7 +65,7 @@ export default function Room({ roomId, displayName, onLeave }) {
   const myName = sanitizeDisplayName(displayName);
 
   const [status, setStatus] = useState("idle");
-  const [peerName, setPeerName] = useState(null);
+  const [peers, setPeers] = useState({}); // peerId -> display name, for everyone currently in the room
   const [selectedFile, setSelectedFile] = useState(null);
   const [sendProgress, setSendProgress] = useState(null);
   const [receiveMeta, setReceiveMeta] = useState(null);
@@ -73,6 +78,13 @@ export default function Room({ roomId, displayName, onLeave }) {
   const [copied, setCopied] = useState(false);
 
   const clientRef = useRef(null);
+  // Tracks which peer the *current* in-flight receive is from, so that if
+  // that specific peer disconnects mid-transfer, the stuck "Receiving…" bar
+  // can be cleared without disturbing an unrelated transfer still incoming
+  // from a different, still-connected peer. A ref (not state) because
+  // onPeerLeft below is a closure captured once at connect-time and needs
+  // the *current* value, not the one from the render it was created in.
+  const receivingFromRef = useRef(null);
 
   useEffect(() => {
     const client = connect({
@@ -87,18 +99,38 @@ export default function Room({ roomId, displayName, onLeave }) {
           setSendProgress(null);
         }
       },
-      onPeerName: (name) => setPeerName(name || "Peer"),
-      onPeerJoined: (name) => {
+      onPeerName: (name, peerId) => setPeers((prev) => ({ ...prev, [peerId]: name || "Peer" })),
+      onPeerJoined: (name, peerId) => {
         const joinedName = name || "Peer";
-        setPeerName(joinedName);
+        setPeers((prev) => ({ ...prev, [peerId]: joinedName }));
         setMessages((prev) => [...prev, { from: "system", text: `${joinedName} joined the room`, time: Date.now() }]);
       },
-      onPeerLeft: (name) => {
-        const leftName = name || peerName || "Your peer";
+      onPeerLeft: (name, peerId) => {
+        const leftName = name || "A peer";
+        setPeers((prev) => {
+          const next = { ...prev };
+          delete next[peerId];
+          return next;
+        });
+        // If the peer who just left was mid-sending us a file, no file-end
+        // will ever arrive for it — clear the stuck progress bar. Leave it
+        // alone if it belongs to a different, still-connected peer.
+        if (receivingFromRef.current === peerId) {
+          receivingFromRef.current = null;
+          setReceiveProgress(null);
+          setReceiveMeta(null);
+        }
         setMessages((prev) => [...prev, { from: "system", text: `${leftName} left the room`, time: Date.now() }]);
       },
-      onProgress: (p) => setReceiveProgress(p),
-      onFileReceived: (blob, meta) => {
+      // With multiple peers, two incoming transfers could in principle overlap;
+      // this keeps a single "receiving" indicator (last one wins) rather than a
+      // per-peer progress list, which is enough for this feature's scope.
+      onProgress: (p, peerId) => {
+        receivingFromRef.current = peerId;
+        setReceiveProgress(p);
+      },
+      onFileReceived: (blob, meta, peerId) => {
+        receivingFromRef.current = null;
         setReceiveProgress(null);
         setReceiveMeta(null);
         setTransfers((prev) => [
@@ -109,6 +141,7 @@ export default function Room({ roomId, displayName, onLeave }) {
             sha256: meta.actualHash,
             integrityOk: meta.integrityOk,
             url: URL.createObjectURL(blob),
+            fromPeerId: peerId,
             time: Date.now(),
           },
           ...prev,
@@ -137,7 +170,7 @@ export default function Room({ roomId, displayName, onLeave }) {
   }, [receiveProgress, receiveMeta]);
 
   const shareUrl = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
-  const info = statusInfo(status, peerName);
+  const info = statusInfo(status, peers);
   const connected = status === "connected";
 
   const handleFiles = (files) => {
@@ -305,6 +338,9 @@ export default function Room({ roomId, displayName, onLeave }) {
                 <div className="transfer-info">
                   <div>
                     <strong>{t.name}</strong> <span className="muted">({formatBytes(t.size)})</span>
+                    {t.direction === "received" && (
+                      <span className="muted"> — from {peers[t.fromPeerId] || "Peer"}</span>
+                    )}
                   </div>
                   <div className="muted transfer-hash">
                     sha256: {t.sha256 ? t.sha256.slice(0, 16) + "…" : "n/a"}
