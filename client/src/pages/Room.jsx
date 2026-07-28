@@ -25,6 +25,17 @@ function namesList(peers) {
 // be more than one now), so they can't live in the static lookup above.
 function statusInfo(status, peers) {
   if (status && status.startsWith("error:")) return { text: status, tone: "bad" };
+  if (status && status.startsWith("stalled:")) {
+    const rest = status.slice("stalled:".length);
+    const sep = rest.indexOf(":");
+    const reason = sep === -1 ? rest : rest.slice(0, sep);
+    const who = (sep === -1 ? "" : rest.slice(sep + 1)) || "a peer";
+    const hint =
+      reason === "no-turn-configured"
+        ? "no TURN relay is configured — this happens behind strict corporate/university firewalls that STUN alone can't get through"
+        : "the configured TURN relay couldn't find a route either";
+    return { text: `Still connecting to ${who} after 10s — ${hint}.`, tone: "bad" };
+  }
   const names = namesList(peers);
   switch (status) {
     case "peer-joined":
@@ -44,7 +55,7 @@ function statusInfo(status, peers) {
 // stale percentages forever. One peer leaving a multi-peer room is *not*
 // terminal on its own (others may still be connected) — peerClient.js
 // already re-derives "connected" vs "waiting-for-peer" after any single
-// peer-left, so that's handled via onStatus, not this set.
+// peer-left, so that's handled per-peer in onPeerLeft below, not this set.
 const TERMINAL_STATUSES = new Set([
   "disconnected",
   "failed",
@@ -68,8 +79,12 @@ export default function Room({ roomId, displayName, onLeave }) {
   const [peers, setPeers] = useState({}); // peerId -> display name, for everyone currently in the room
   const [selectedFile, setSelectedFile] = useState(null);
   const [sendProgress, setSendProgress] = useState(null);
-  const [receiveMeta, setReceiveMeta] = useState(null);
-  const [receiveProgress, setReceiveProgress] = useState(null);
+  // Keyed by `${peerId}:${fileId}` so two peers sending concurrently (or one
+  // peer's file overlapping briefly with a stale/abandoned prior one) each
+  // get their own row instead of one shared "last update wins" indicator —
+  // fileTransfer.js's per-peer-channel + per-file isolation is what makes
+  // this safe to track this granularly in the first place.
+  const [incomingTransfers, setIncomingTransfers] = useState({});
   const [transfers, setTransfers] = useState([]);
   const [messages, setMessages] = useState([]);
   const [chatInput, setChatInput] = useState("");
@@ -78,13 +93,6 @@ export default function Room({ roomId, displayName, onLeave }) {
   const [copied, setCopied] = useState(false);
 
   const clientRef = useRef(null);
-  // Tracks which peer the *current* in-flight receive is from, so that if
-  // that specific peer disconnects mid-transfer, the stuck "Receiving…" bar
-  // can be cleared without disturbing an unrelated transfer still incoming
-  // from a different, still-connected peer. A ref (not state) because
-  // onPeerLeft below is a closure captured once at connect-time and needs
-  // the *current* value, not the one from the render it was created in.
-  const receivingFromRef = useRef(null);
 
   useEffect(() => {
     const client = connect({
@@ -94,8 +102,7 @@ export default function Room({ roomId, displayName, onLeave }) {
       onStatus: (s) => {
         setStatus(s);
         if (TERMINAL_STATUSES.has(s)) {
-          setReceiveProgress(null);
-          setReceiveMeta(null);
+          setIncomingTransfers({});
           setSendProgress(null);
         }
       },
@@ -112,27 +119,32 @@ export default function Room({ roomId, displayName, onLeave }) {
           delete next[peerId];
           return next;
         });
-        // If the peer who just left was mid-sending us a file, no file-end
-        // will ever arrive for it — clear the stuck progress bar. Leave it
-        // alone if it belongs to a different, still-connected peer.
-        if (receivingFromRef.current === peerId) {
-          receivingFromRef.current = null;
-          setReceiveProgress(null);
-          setReceiveMeta(null);
-        }
+        // Any file this specific peer was mid-sending us will never get a
+        // file-end — clear only their row(s), leaving transfers from other,
+        // still-connected peers untouched (each peer's receive state is
+        // fully independent — see fileTransfer.js).
+        setIncomingTransfers((prev) => {
+          const next = {};
+          for (const [key, entry] of Object.entries(prev)) {
+            if (entry.peerId !== peerId) next[key] = entry;
+          }
+          return next;
+        });
         setMessages((prev) => [...prev, { from: "system", text: `${leftName} left the room`, time: Date.now() }]);
       },
-      // With multiple peers, two incoming transfers could in principle overlap;
-      // this keeps a single "receiving" indicator (last one wins) rather than a
-      // per-peer progress list, which is enough for this feature's scope.
-      onProgress: (p, peerId) => {
-        receivingFromRef.current = peerId;
-        setReceiveProgress(p);
+      // Each concurrent sender gets its own row, keyed by peer + file id —
+      // see the incomingTransfers state comment above.
+      onProgress: (p, peerId, fileId) => {
+        const key = `${peerId}:${fileId}`;
+        setIncomingTransfers((prev) => ({ ...prev, [key]: { peerId, fileId, progress: p } }));
       },
       onFileReceived: (blob, meta, peerId) => {
-        receivingFromRef.current = null;
-        setReceiveProgress(null);
-        setReceiveMeta(null);
+        const key = `${peerId}:${meta.fileId}`;
+        setIncomingTransfers((prev) => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
         setTransfers((prev) => [
           {
             direction: "received",
@@ -145,6 +157,23 @@ export default function Room({ roomId, displayName, onLeave }) {
             time: Date.now(),
           },
           ...prev,
+        ]);
+      },
+      // The sender gave up on this specific transfer (e.g. this peer's
+      // connection was too backed up for too long) without disconnecting —
+      // clear just that row instead of leaving it frozen at a stale
+      // percentage with no explanation.
+      onFileAborted: (peerId, _fileId, peerName) => {
+        setIncomingTransfers((prev) => {
+          const next = {};
+          for (const [key, entry] of Object.entries(prev)) {
+            if (entry.peerId !== peerId) next[key] = entry;
+          }
+          return next;
+        });
+        setMessages((prev) => [
+          ...prev,
+          { from: "system", text: `Transfer from ${peerName || "a peer"} was interrupted`, time: Date.now() },
         ]);
       },
       onText: (text, name) => {
@@ -160,18 +189,10 @@ export default function Room({ roomId, displayName, onLeave }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId]);
 
-  // Track "receiving a file" separately from raw byte progress so the UI can
-  // show a filename while a transfer is in flight (fileTransfer.js only
-  // exposes the meta once file-meta arrives, before any progress ticks).
-  useEffect(() => {
-    if (receiveProgress !== null && receiveProgress < 1 && !receiveMeta) {
-      setReceiveMeta({ name: "incoming file" });
-    }
-  }, [receiveProgress, receiveMeta]);
-
   const shareUrl = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
   const info = statusInfo(status, peers);
   const connected = status === "connected";
+  const incomingList = Object.values(incomingTransfers);
 
   const handleFiles = (files) => {
     const file = files && files[0];
@@ -312,15 +333,18 @@ export default function Room({ roomId, displayName, onLeave }) {
         </button>
       </div>
 
-      {receiveProgress !== null && receiveProgress < 1 && (
+      {incomingList.length > 0 && (
         <div className="card">
           <h2>Receiving…</h2>
-          <div className="progress-row">
-            <div className="progress-bar">
-              <div className="progress-fill" style={{ width: `${Math.round(receiveProgress * 100)}%` }} />
+          {incomingList.map((t) => (
+            <div key={`${t.peerId}:${t.fileId}`} className="progress-row">
+              <span className="muted">{peers[t.peerId] || "Peer"}:</span>
+              <div className="progress-bar">
+                <div className="progress-fill" style={{ width: `${Math.round(t.progress * 100)}%` }} />
+              </div>
+              <span className="muted">{Math.round(t.progress * 100)}%</span>
             </div>
-            <span className="muted">{Math.round(receiveProgress * 100)}%</span>
-          </div>
+          ))}
         </div>
       )}
 
