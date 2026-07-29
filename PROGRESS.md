@@ -14,9 +14,9 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
 - **Phase 5: MongoDB Integration** — DONE
 - **Phase 6: Gemini API Auxiliary Module** — PENDING
 - **Phase 7: Testing, Polish, Deployment** — PENDING
-- **Multi-Peer Mesh Support** (3-4 peers per room) — DONE, on the `multi-peer` branch
-  (not yet merged to `main`). Originally scoped to Future Scope only; reversed after
-  discussion with the guide, who approved building it now.
+- **Multi-Peer Mesh Support** (3-4 peers per room) — DONE, merged to `main`.
+  Originally scoped to Future Scope only; reversed after discussion with the
+  guide, who approved building it now.
 
 ## Progress Log
 
@@ -312,3 +312,78 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
     correct room ID and timestamps — the metrics pipeline persists real data
     end-to-end, not just to a local/mocked connection.
   - `MONGO_URI` lives only in the git-ignored `server/.env`, never committed.
+- **Phase 5 chaos/rigor pass**, before allowing a push: two new permanent test
+  scripts plus a real 5-tab browser session, specifically targeting failure
+  modes the first verification pass didn't cover.
+  - **`server/test-db-resilience.js`** (12/12 checks passed). Unlike
+    `test-stress.js`/`test-load.js`, this doesn't spawn the server as a child
+    process — a mid-session Mongo outage can only be injected by calling
+    `mongoose.disconnect()` directly on the live connection, which a spawned
+    child would hide from the test. Builds the same http+Socket.io wiring
+    `server.js` does, in-process, instead. Confirmed: an unreachable
+    `MONGO_URI` from startup never throws and signaling still completes in
+    ~380ms; a real connection, then a forced mid-session disconnect, still
+    lets a full join+signal+telemetry round trip complete (~246ms, same
+    ballpark as with Mongo up) with zero unhandled promise rejections and zero
+    documents persisted for the write attempted during the outage; reconnects
+    cleanly once the outage clears.
+  - **Real 5-tab mesh session** (Alice/Bob/Carol/Dave, plus Carol rejoining
+    with a new tab after leaving): joined/left dynamically up to 4 peers at
+    once, then closed the room, and confirmed the final `RoomSession`
+    document read `peakPeersCount: 4` correctly — preserved even though the
+    room ended with 0 peers, i.e. it's tracking a true peak, not a live count.
+  - **Simultaneous multi-sender transfers**: Alice and Carol broadcast
+    different 3MB files to the mesh at the same time; both were received and
+    sha256-verified by every other peer with no cross-contamination between
+    the two concurrent streams.
+  - **Mid-transfer abort, both directions** (100MB files, killed by closing a
+    real browser tab): killing the *sender's* tab reliably produces an
+    `aborted` `TransferMetric` (`sha256Match: false`) from every surviving
+    receiver — verified for two independent sender identities. Killing a
+    *receiver's* tab instead produces **no record at all** for that specific
+    sender→receiver pairing, since the receiver is the sole telemetry
+    reporter for a transfer and it died before it could report — meanwhile
+    every *other* receiver in the same broadcast completes and verifies
+    normally, confirmed via a full 100MB transfer to a surviving peer. Not a
+    bug: a real, working-as-designed gap worth knowing about, since it means
+    the metrics log can under-report failures where the receiver vanishes
+    outright, as opposed to the sender vanishing.
+  - **Reconciliation finding**: an organic, real Atlas connection blip
+    happened mid-session (not engineered) during the simultaneous-transfer
+    test — 2 of 6 `TransferMetric` writes failed to persist
+    (`MongoDB disconnected` / `MongoDB reconnected` in the server log a few
+    seconds apart). The room's *aggregate* `RoomSession` counts
+    (`totalTransfersCompleted: 7, totalTransfersFailed: 6`) came out exactly
+    right regardless, because `metricsTracker`'s in-memory counters run
+    independently of the Mongo write attempt — but the detailed
+    per-transfer `TransferMetric` log ended up with only 11 of the 13 actual
+    outcomes. Aggregate room-level counts are reliable; the detailed
+    transfer-by-transfer log can have gaps if Mongo blips at the wrong
+    moment. Acceptable given the fire-and-forget-by-design goal, but worth
+    knowing if the detail log is ever relied on for exact accounting.
+  - **`server/test-telemetry-sanitization.js`** (9/9 checks passed). Spawns
+    the server as a child process and fires 16 malformed/malicious
+    `telemetry:transfer_result` payloads directly from a raw
+    `socket.io-client` (bypassing the UI): missing fields, wrong types,
+    negative/`NaN`/`Infinity` numbers, a non-enum status string, a NoSQL-
+    operator-shaped status object, prototype-pollution-shaped payloads, and
+    non-object payloads (`null`, a bare string, an array). None were
+    persisted, the server never crashed, `/health` kept responding
+    throughout, and a legitimate payload sent right after the barrage still
+    persisted correctly. A payload with valid data plus harmless extra fields
+    was correctly accepted with the extra fields stripped by the schema (this
+    is correct behavior, not a finding — an earlier draft of this test
+    mistakenly scored it as an attack that should be rejected). One
+    informational note, not a vulnerability: an implausibly huge
+    `fileSizeBytes` (`Number.MAX_SAFE_INTEGER`) is currently accepted with no
+    upper bound — nothing crashes, but it's a data-quality gap worth an
+    upper-bound check if this is ever a concern.
+  - Confirmed by inspection: `persistRoomSession`/`persistTransferMetric` are
+    never `await`ed anywhere in `signaling.js` — genuinely fire-and-forget.
+    Grepped `server/src` and `client/src` for `console.log`: the only three
+    hits (`db.js` x2, `server.js` x1) are meaningful operational logs
+    (connection status, server startup), not debug leftovers.
+  - Test data from this pass (rooms `H1NPRX`, `KFVTZU`, and a handful of
+    `resilience-test-*`/sanitization-test-* rooms) remains in the Atlas
+    cluster as of this writing — harmless (dev-only free cluster), but not
+    yet purged.
