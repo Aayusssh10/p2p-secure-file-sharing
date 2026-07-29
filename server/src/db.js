@@ -1,4 +1,10 @@
+const dns = require("dns");
 const mongoose = require("mongoose");
+
+// Node's own DNS client (c-ares) fails to resolve mongodb+srv:// SRV
+// records on some Windows setups even though the OS resolver works fine
+// (querySrv ECONNREFUSED) — pointing it at a public resolver fixes it.
+dns.setServers(["8.8.8.8", "8.8.4.4"]);
 
 // Metrics persistence is strictly additive to this app's actual job
 // (signaling). MONGO_URI missing, MongoDB unreachable, or MongoDB dropping

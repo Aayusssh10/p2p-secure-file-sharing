@@ -11,7 +11,7 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
 - **Phase 2: Signaling Server** (Node.js, Express, Socket.io) — DONE
 - **Phase 3: WebRTC Peer Connection Layer** — DONE
 - **Phase 4: React Frontend** (rooms, file picker, progress UI) — DONE
-- **Phase 5: MongoDB Integration** — PENDING
+- **Phase 5: MongoDB Integration** — DONE
 - **Phase 6: Gemini API Auxiliary Module** — PENDING
 - **Phase 7: Testing, Polish, Deployment** — PENDING
 - **Multi-Peer Mesh Support** (3-4 peers per room) — DONE, on the `multi-peer` branch
@@ -284,3 +284,31 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
     stays clean.
   - Working on the `multi-peer` git branch, not `main` — the already-tested 2-peer
     version stays safe and gradable until this is deliberately merged.
+- **Phase 5: MongoDB integration, verified against a real Atlas cluster.** The
+  models/persistence code (`db.js`, `metricsPersistence.js`, `metricsTracker.js`,
+  `models/RoomSession.js`, `models/TransferMetric.js`) had been written but never
+  run against a reachable database. Set up a free MongoDB Atlas M0 cluster and
+  verified it end-to-end:
+  - **Found and fixed two real environment bugs**, neither in the Mongo logic
+    itself: (1) Node's own DNS client (c-ares) failed to resolve the
+    `mongodb+srv://` SRV record on this machine with `querySrv ECONNREFUSED`,
+    even though the OS resolver (`nslookup`) resolved it fine — fixed by pointing
+    Node's resolver at a public DNS server (`dns.setServers(["8.8.8.8",
+    "8.8.4.4"])`) at the top of `db.js`, before `mongoose.connect()` runs.
+    (2) `dotenv.config()` in `server.js` only found `server/.env` when the process
+    was launched with cwd already inside `server/` (e.g. `npm --prefix server
+    start`) — launching it from the repo root (as `.claude/launch.json` does)
+    silently loaded no env file at all, so `MONGO_URI` read as undefined. Fixed
+    by resolving the `.env` path explicitly relative to `server.js` itself
+    (`path.join(__dirname, "..", ".env")`) instead of relying on process cwd.
+  - **Verified with a live two-tab browser transfer**, not just a connection
+    check: created a room, joined a second tab, sent a 64KB file (drag-drop via
+    a synthetic `DataTransfer`, same headless-browser workaround as earlier
+    phases), confirmed sha256 verified on the receiving side, then had both tabs
+    leave the room. Queried the Atlas cluster directly afterward and confirmed
+    both a `TransferMetric` document (`fileSizeBytes: 65536, status: "completed",
+    sha256Match: true`) and a `RoomSession` document (`peakPeersCount: 2,
+    totalTransfersCompleted: 1, totalTransfersFailed: 0`) were written with the
+    correct room ID and timestamps — the metrics pipeline persists real data
+    end-to-end, not just to a local/mocked connection.
+  - `MONGO_URI` lives only in the git-ignored `server/.env`, never committed.
