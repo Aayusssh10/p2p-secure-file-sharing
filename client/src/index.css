@@ -220,6 +220,11 @@ body {
   font-size: 0.85rem;
 }
 
+.gemini-note {
+  font-style: italic;
+  margin-top: 4px;
+}
+
 .progress-row {
   display: flex;
   align-items: center;

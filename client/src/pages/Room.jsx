@@ -65,6 +65,40 @@ const TERMINAL_STATUSES = new Set([
   "room-full",
 ]);
 
+// Phase 6 (Gemini): both calls are best-effort UI polish, never load-bearing
+// — a network error, timeout, or the server having no GEMINI_API_KEY all
+// just resolve to null here, same as the server-side fallback, so a failure
+// never surfaces as an error banner or blocks anything else in the room.
+async function fetchGeminiSummary(file) {
+  try {
+    const res = await fetch(`${SERVER_URL}/gemini/summarize-file`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fileName: file.name, fileSizeBytes: file.size, mimeType: file.type }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.summary || null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchGeminiStatusExplanation(statusSnippet) {
+  try {
+    const res = await fetch(`${SERVER_URL}/gemini/connection-status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ statusSnippet }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.message || null;
+  } catch {
+    return null;
+  }
+}
+
 function formatBytes(bytes) {
   if (!bytes) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
@@ -91,6 +125,8 @@ export default function Room({ roomId, displayName, onLeave }) {
   const [isDragging, setIsDragging] = useState(false);
   const [error, setError] = useState(null);
   const [copied, setCopied] = useState(false);
+  const [fileSummary, setFileSummary] = useState(null);
+  const [statusExplanation, setStatusExplanation] = useState(null);
 
   const clientRef = useRef(null);
 
@@ -194,13 +230,40 @@ export default function Room({ roomId, displayName, onLeave }) {
   const connected = status === "connected";
   const incomingList = Object.values(incomingTransfers);
 
+  // Only the most recently dropped file's summary should ever land — a
+  // stale response for a file the user already replaced/sent is dropped.
+  const summaryRequestRef = useRef(0);
+
   const handleFiles = (files) => {
     const file = files && files[0];
     if (file) {
       setSelectedFile(file);
       setError(null);
+      setFileSummary(null);
+      const requestId = ++summaryRequestRef.current;
+      fetchGeminiSummary(file).then((summary) => {
+        if (summaryRequestRef.current === requestId) setFileSummary(summary);
+      });
     }
   };
+
+  // Auto-explain any "bad" tone status (stalls, drops, failures) via Gemini —
+  // fires once per distinct status value, never re-fires from unrelated
+  // re-renders since it's keyed off the status string itself.
+  useEffect(() => {
+    if (info.tone !== "bad") {
+      setStatusExplanation(null);
+      return;
+    }
+    let cancelled = false;
+    fetchGeminiStatusExplanation(status).then((message) => {
+      if (!cancelled) setStatusExplanation(message);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status]);
 
   const handleSend = async () => {
     if (!selectedFile || !clientRef.current) return;
@@ -221,6 +284,7 @@ export default function Room({ roomId, displayName, onLeave }) {
         ...prev,
       ]);
       setSelectedFile(null);
+      setFileSummary(null);
     } catch (err) {
       setError(err.message || "Failed to send file");
     } finally {
@@ -277,6 +341,7 @@ export default function Room({ roomId, displayName, onLeave }) {
         <span className="status-dot" />
         {info.text}
       </div>
+      {statusExplanation && <div className="muted gemini-note">{statusExplanation}</div>}
 
       {error && <div className="banner banner-error">{error}</div>}
 
@@ -307,6 +372,7 @@ export default function Room({ roomId, displayName, onLeave }) {
             <div>
               <strong>{selectedFile.name}</strong>
               <div className="muted">{formatBytes(selectedFile.size)}</div>
+              {fileSummary && <div className="muted gemini-note">{fileSummary}</div>}
             </div>
           ) : (
             <div className="muted">

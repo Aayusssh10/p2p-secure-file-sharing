@@ -12,7 +12,7 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
 - **Phase 3: WebRTC Peer Connection Layer** — DONE
 - **Phase 4: React Frontend** (rooms, file picker, progress UI) — DONE
 - **Phase 5: MongoDB Integration** — DONE
-- **Phase 6: Gemini API Auxiliary Module** — PENDING
+- **Phase 6: Gemini API Auxiliary Module** — DONE
 - **Phase 7: Testing, Polish, Deployment** — PENDING
 - **Multi-Peer Mesh Support** (3-4 peers per room) — DONE, merged to `main`.
   Originally scoped to Future Scope only; reversed after discussion with the
@@ -387,3 +387,47 @@ Future sessions should start with "continue from PROGRESS.md" instead of a maste
     `resilience-test-*`/sanitization-test-* rooms) remains in the Atlas
     cluster as of this writing — harmless (dev-only free cluster), but not
     yet purged.
+- **Phase 6: Gemini API auxiliary module.** Two lightweight, strictly
+  additive features: an auto-generated one-sentence summary when a file is
+  dropped (category + rough transfer-time estimate from metadata only), and
+  a plain-language explanation of the connection status whenever it turns
+  "bad" (stalls, drops, room-full, etc.), replacing raw technical strings
+  like `stalled:ice-timeout:Bob` with something a non-technical user can
+  actually read.
+  - **Server-mediated by design, not called from the browser.** New
+    `server/src/gemini.js` holds the `GEMINI_API_KEY` (in `server/.env`,
+    same as `MONGO_URI` — never committed) and two new Express routes,
+    `POST /gemini/summarize-file` and `POST /gemini/connection-status`, that
+    the client calls instead of hitting Google directly. Avoids exposing the
+    key in the client bundle, and keeps the core "file content never touches
+    the server" guarantee structurally true: the summarize route only ever
+    receives file *metadata* (name/size/MIME type), the status route only a
+    short status string — never file bytes.
+  - Same fire-and-forget philosophy as `db.js`: `GEMINI_API_KEY` missing, a
+    slow response, or an API error all resolve to `null` rather than
+    throwing, so the calling route responds `{ summary: null }` /
+    `{ message: null }` and the client silently shows nothing extra —
+    Gemini being down can never block a transfer or crash the server.
+  - **Found and fixed two real issues while wiring this up**, neither
+    obvious from the docs: (1) the model name `gemini-2.5-flash` returned a
+    live 404 — `"This model ... is no longer available to new users"` —
+    despite still appearing in the account's own `ListModels` response;
+    switched to the `gemini-flash-latest` alias (currently resolves to
+    `gemini-3.6-flash`) so the app tracks whatever Google currently
+    recommends instead of a pinned version that can be pulled without
+    notice. (2) that model has extended "thinking" on by default, which
+    pushed real responses past the original 8s timeout
+    (`AbortError: This operation was aborted`, confirmed via server logs)
+    even though the underlying prompts are one sentence long — fixed by
+    setting `generationConfig.thinkingConfig.thinkingBudget: 1` (`0` is
+    rejected by this model with a 400) and raising the timeout to 15s as a
+    safety margin; responses now land in ~3.6-3.8s.
+  - **Verified with real browser interactions, not just curl**: dropped a
+    500KB PDF in a live 2-peer room and confirmed the exact rendered summary
+    ("This PDF document is only about 500 KB, so it should transfer almost
+    instantly..."); separately filled a room to the 4-peer cap and had a 5th
+    peer get rejected, confirming the real `room-full` status triggered a
+    live Gemini call and rendered "This sharing room is currently full, so
+    we will connect you as soon as a spot opens up." under the status pill
+    — the full client → server → Gemini → client round trip, not a mocked
+    path.
